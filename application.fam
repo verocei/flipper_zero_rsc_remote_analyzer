@@ -1,0 +1,14 @@
+App(
+    appid="rsc_remote_analyzer",
+    name="RSC Remote Analyzer",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="rsc_remote_analyzer_app",
+    # The scan runs on its own worker thread; the decoders run on the SubGhzWorker thread.
+    stack_size=4 * 1024,
+    requires=["gui", "storage", "dialogs", "notification"],
+    fap_category="Sub-GHz",
+    fap_author="Athos / RSC",
+    fap_version="0.1",
+    fap_description="Automatic remote analyzer: finds frequency and modulation, identifies the protocol",
+    fap_icon="icon_10px.png",  # 10x10 1-bit remote control icon
+)

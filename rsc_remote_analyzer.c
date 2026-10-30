@@ -1,0 +1,1875 @@
+/*
+ * RSC Remote Analyzer - automatic Sub-GHz remote control analyzer for Flipper Zero (Momentum).
+ *
+ * One long press on the remote: the app finds the frequency (coarse sweep on the setting list,
+ * then a narrow-band fine sweep), then tries the four receive presets one after another
+ * (AM270, AM650, FM238, FM476) with every decoder of the firmware, and shows the result.
+ * If the remote stops sending before a preset is tested, it asks for another press and goes on
+ * with the results it already has.
+ *
+ * Receive only: the app never transmits.
+ */
+
+#include <furi.h>
+#include <furi_hal.h>
+#include <gui/gui.h>
+#include <gui/elements.h>
+#include <gui/view.h>
+#include <gui/view_dispatcher.h>
+#include <gui/modules/submenu.h>
+#include <gui/modules/widget.h>
+#include <gui/modules/text_box.h>
+#include <gui/modules/text_input.h>
+#include <gui/modules/variable_item_list.h>
+#include <dialogs/dialogs.h>
+#include <storage/storage.h>
+#include <notification/notification_messages.h>
+#include <flipper_format/flipper_format.h>
+#include <flipper_format/flipper_format_i.h>
+#include <toolbox/stream/stream.h>
+#include <toolbox/stream/file_stream.h>
+#include <datetime/datetime.h>
+
+#include <math.h>
+
+#include <lib/subghz/receiver.h>
+#include <lib/subghz/blocks/generic.h>
+#include <lib/subghz/subghz_worker.h>
+#include <lib/subghz/subghz_setting.h>
+#include <lib/subghz/subghz_protocol_registry.h>
+#include <lib/subghz/devices/devices.h>
+#include <lib/subghz/devices/cc1101_int/cc1101_int_interconnect.h>
+#include <lib/subghz/devices/cc1101_configs.h>
+
+#define TAG "RscRemoteAnalyzer"
+
+#define APP_NAME    "RSC Remote Analyzer"
+#define APP_VERSION "0.1"
+
+#define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
+#define REPORT_DIR    DATA_DIR "/reports"
+#define SETTINGS_PATH DATA_DIR "/settings.txt"
+#define SUB_DIR       EXT_PATH("subghz/rsc_remote_analyzer")
+
+#define SETTINGS_FILE_TYPE "RSC Remote Analyzer Settings"
+#define REPORT_FILE_TYPE   "RSC Remote Analyzer Report"
+
+#define PRESET_COUNT 4
+#define CAND_MAX     6
+#define RAW_MAX      2048
+#define FREQ_MAX     255
+#define NAME_LEN     32
+
+/* Timing of the modulation search (ms) */
+#define TICK_MS        5
+#define SILENCE_MS     350 /* no signal this long = the remote stopped sending */
+#define PROMPT_MS      400 /* waiting this long for a signal = ask for another press */
+#define MIN_SPAN_MS    250 /* a preset counts as tested after this much signal */
+#define MAX_ATTEMPTS   2 /* ... or after this many short presses */
+#define REFIND_MS      5000 /* no signal at all on the found frequency: search again */
+#define MODEL_EVERY_MS 50
+
+/* Fine frequency search */
+#define FINE_SPAN_HZ   300000
+#define FINE_STEP_HZ   20000
+#define FINE2_STEP_HZ  5000
+#define SNAP_HZ        75000
+#define CC1101_MDMCFG4 0x10
+
+#define FLAG_STOP   (1UL << 0)
+#define FLAG_FINISH (1UL << 1)
+
+/* ------------------------------------------------------------------------- */
+/* Presets                                                                    */
+
+typedef struct {
+    const char* name;
+    FuriHalSubGhzPreset preset;
+} PresetDef;
+
+static const PresetDef presets[PRESET_COUNT] = {
+    {"AM270", FuriHalSubGhzPresetOok270Async},
+    {"AM650", FuriHalSubGhzPresetOok650Async},
+    {"FM238", FuriHalSubGhzPreset2FSKDev238Async},
+    {"FM476", FuriHalSubGhzPreset2FSKDev476Async},
+};
+
+/* Tie-break between presets with equal results: the most common ones first */
+static const uint8_t preset_rank[PRESET_COUNT] = {2, 4, 3, 1};
+
+/* ------------------------------------------------------------------------- */
+/* Settings                                                                   */
+
+static const int8_t sensitivity_dbm[] = {-65, -75, -85};
+static const char* const sensitivity_names[] = {"Alacsony", "Normal", "Magas"};
+static const uint16_t window_ms[] = {600, 1000, 1600};
+static const char* const window_names[] = {"Rovid", "Normal", "Hosszu"};
+static const char* const yes_no[] = {"Nem", "Igen"};
+static const char* const on_off[] = {"Ki", "Be"};
+static const char* const manual_preset_names[] = {"Auto", "AM270", "AM650", "FM238", "FM476"};
+
+typedef struct {
+    uint32_t sensitivity; /* index into sensitivity_dbm */
+    uint32_t window; /* index into window_ms */
+    uint32_t all_presets; /* 1 = always try all four presets */
+    uint32_t feedback; /* 1 = vibro/LED feedback */
+} Settings;
+
+/* ------------------------------------------------------------------------- */
+/* Analysis state                                                             */
+
+typedef struct {
+    bool done;
+    bool signal_seen;
+    uint8_t attempts;
+    uint16_t decodes;
+    uint32_t span_ms; /* longest signal span seen while testing */
+    float rssi_max;
+    uint32_t pulses_ok;
+    uint32_t pulses_glitch;
+    uint32_t pulses_long;
+} PresetResult;
+
+typedef struct {
+    bool used;
+    char name[NAME_LEN];
+    SubGhzProtocolType type;
+    uint16_t count;
+    uint16_t repeats; /* decodes identical to the previous one */
+    uint16_t changes; /* decodes different from the previous one */
+    uint32_t last_hash;
+    uint16_t per_preset[PRESET_COUNT];
+    uint8_t last_preset;
+    FuriString* info;
+    FlipperFormat* ff; /* the latest decode, serialized as a .sub key file */
+} Candidate;
+
+typedef enum {
+    PhaseFreq,
+    PhaseMod,
+    PhaseDone,
+} Phase;
+
+typedef struct {
+    Phase phase;
+    bool manual;
+    uint8_t only_preset; /* 0xFF = all */
+    bool freq_found;
+    uint32_t freq_nominal;
+    uint32_t freq_measured;
+    float rssi_peak;
+    bool any_activity; /* signal seen during the modulation search */
+    uint8_t current;
+    PresetResult pr[PRESET_COUNT];
+    Candidate cand[CAND_MAX];
+    int32_t* raw_cur;
+    size_t raw_cur_n;
+    int32_t* raw_best;
+    size_t raw_best_n;
+    uint8_t raw_best_preset;
+    uint32_t raw_best_score;
+} Analysis;
+
+typedef struct {
+    bool started;
+    uint32_t first;
+    uint32_t last;
+    uint32_t wait_since;
+    bool prompted;
+} Window;
+
+/* ------------------------------------------------------------------------- */
+/* Views                                                                      */
+
+typedef enum {
+    ViewMain,
+    ViewScan,
+    ViewResult,
+    ViewDetails,
+    ViewText,
+    ViewTextInput,
+    ViewSettings,
+    ViewManual,
+} ViewId;
+
+typedef enum {
+    EvMenuAuto = 1,
+    EvMenuManual,
+    EvMenuSaved,
+    EvMenuSettings,
+    EvScanDone,
+    EvScanFinish,
+    EvScanCancel,
+    EvResultNew,
+    EvResultSave,
+    EvResultMore,
+    EvDetailData,
+    EvDetailModulation,
+    EvDetailCompat,
+    EvNameDone,
+    EvManualStart,
+} EventId;
+
+#define MAIN_ITEMS 4
+
+typedef struct {
+    uint8_t selected;
+} MainModel;
+
+typedef enum {
+    MarkPending,
+    MarkTested,
+    MarkDecoded,
+    MarkSkipped,
+} Mark;
+
+typedef struct {
+    Phase phase;
+    bool freq_known;
+    uint32_t freq;
+    float rssi;
+    uint8_t current;
+    uint8_t marks[PRESET_COUNT];
+    char protocol[NAME_LEN];
+    char status[40];
+    bool prompt;
+} ScanModel;
+
+typedef struct {
+    Gui* gui;
+    ViewDispatcher* vd;
+    NotificationApp* notif;
+    Storage* storage;
+    DialogsApp* dialogs;
+
+    View* main_view;
+    View* scan_view;
+    Widget* result;
+    Submenu* details;
+    TextBox* text_box;
+    TextInput* text_input;
+    VariableItemList* settings_list;
+    VariableItemList* manual_list;
+    ViewId current_view;
+    ViewId text_return;
+
+    FuriString* text;
+    FuriString* summary;
+    char name_buf[NAME_LEN];
+
+    Settings settings;
+    uint8_t manual_freq;
+    uint8_t manual_preset;
+
+    const SubGhzDevice* device;
+    SubGhzEnvironment* env;
+    SubGhzReceiver* receiver;
+    SubGhzWorker* sworker;
+    SubGhzSetting* setting;
+    uint32_t freqs[FREQ_MAX];
+    size_t freq_count;
+    uint8_t* narrow_preset;
+    bool rx_running;
+
+    FuriThread* thread;
+    FuriMutex* mutex;
+    Analysis an;
+    Window win;
+    volatile bool counting;
+    float threshold;
+    uint32_t last_model;
+    FuriString* preset_name;
+    int8_t best;
+} App;
+
+/* ------------------------------------------------------------------------- */
+/* Small helpers                                                              */
+
+static uint32_t now_ms(void) {
+    return furi_get_tick() * 1000 / furi_kernel_get_tick_frequency();
+}
+
+static void format_freq(char* out, size_t size, uint32_t f) {
+    snprintf(
+        out,
+        size,
+        "%lu.%02lu MHz",
+        (unsigned long)(f / 1000000),
+        (unsigned long)((f % 1000000) / 10000));
+}
+
+static void format_freq_long(FuriString* out, uint32_t f) {
+    furi_string_cat_printf(
+        out,
+        "%lu.%03lu MHz",
+        (unsigned long)(f / 1000000),
+        (unsigned long)((f % 1000000) / 1000));
+}
+
+static void feedback(App* app, const NotificationSequence* seq) {
+    if(app->settings.feedback) notification_message(app->notif, seq);
+}
+
+static const char* type_text(SubGhzProtocolType type) {
+    switch(type) {
+    case SubGhzProtocolTypeStatic:
+        return "Fix kodos";
+    case SubGhzProtocolTypeDynamic:
+        return "Ugrokodos";
+    default:
+        return "Nem meghatarozott";
+    }
+}
+
+static const char* type_key(SubGhzProtocolType type) {
+    switch(type) {
+    case SubGhzProtocolTypeStatic:
+        return "Static";
+    case SubGhzProtocolTypeDynamic:
+        return "Dynamic";
+    default:
+        return "Other";
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Settings file                                                              */
+
+static void settings_defaults(Settings* s) {
+    s->sensitivity = 1;
+    s->window = 1;
+    s->all_presets = 1;
+    s->feedback = 1;
+}
+
+static void settings_load(App* app) {
+    settings_defaults(&app->settings);
+    FlipperFormat* ff = flipper_format_file_alloc(app->storage);
+    FuriString* header = furi_string_alloc();
+    uint32_t version = 0;
+    if(flipper_format_file_open_existing(ff, SETTINGS_PATH) &&
+       flipper_format_read_header(ff, header, &version) &&
+       furi_string_equal(header, SETTINGS_FILE_TYPE)) {
+        uint32_t v;
+        if(flipper_format_read_uint32(ff, "Sensitivity", &v, 1) && v < COUNT_OF(sensitivity_dbm))
+            app->settings.sensitivity = v;
+        flipper_format_rewind(ff);
+        if(flipper_format_read_uint32(ff, "Window", &v, 1) && v < COUNT_OF(window_ms))
+            app->settings.window = v;
+        flipper_format_rewind(ff);
+        if(flipper_format_read_uint32(ff, "All_presets", &v, 1)) app->settings.all_presets = v ? 1 : 0;
+        flipper_format_rewind(ff);
+        if(flipper_format_read_uint32(ff, "Feedback", &v, 1)) app->settings.feedback = v ? 1 : 0;
+    }
+    furi_string_free(header);
+    flipper_format_free(ff);
+}
+
+static void settings_save(App* app) {
+    storage_simply_mkdir(app->storage, DATA_DIR);
+    FlipperFormat* ff = flipper_format_file_alloc(app->storage);
+    if(flipper_format_file_open_always(ff, SETTINGS_PATH)) {
+        flipper_format_write_header_cstr(ff, SETTINGS_FILE_TYPE, 1);
+        flipper_format_write_uint32(ff, "Sensitivity", &app->settings.sensitivity, 1);
+        flipper_format_write_uint32(ff, "Window", &app->settings.window, 1);
+        flipper_format_write_uint32(ff, "All_presets", &app->settings.all_presets, 1);
+        flipper_format_write_uint32(ff, "Feedback", &app->settings.feedback, 1);
+    }
+    flipper_format_free(ff);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Radio                                                                      */
+
+/* The OOK650 preset with a 58 kHz channel filter, for the fine frequency search */
+static uint8_t* build_narrow_preset(void) {
+    const uint8_t* src = subghz_device_cc1101_preset_ook_650khz_async_regs;
+    size_t pairs = 0;
+    while(src[pairs]) pairs += 2;
+    size_t len = pairs + 2 + 8; /* register pairs, 0 terminator pair, PATABLE */
+    uint8_t* data = malloc(len);
+    memcpy(data, src, len);
+    for(size_t i = 0; i < pairs; i += 2) {
+        if(data[i] == CC1101_MDMCFG4) data[i + 1] = (data[i + 1] & 0x0F) | 0xF0;
+    }
+    return data;
+}
+
+static void build_frequency_list(App* app) {
+    app->freq_count = 0;
+    size_t total = subghz_setting_get_frequency_count(app->setting);
+    for(size_t i = 0; i < total && app->freq_count < FREQ_MAX; i++) {
+        uint32_t f = subghz_setting_get_frequency(app->setting, i);
+        /* Same exclusions as the firmware's Frequency Analyzer (self-noise of the device) */
+        if(f == 464000000 || f == 467750000) continue;
+        if(!subghz_devices_is_frequency_valid(app->device, f)) continue;
+        bool dup = false;
+        for(size_t k = 0; k < app->freq_count; k++)
+            if(app->freqs[k] == f) dup = true;
+        if(!dup) app->freqs[app->freq_count++] = f;
+    }
+    /* Keep the list sorted (insertion sort: qsort is disabled in the firmware API) */
+    for(size_t i = 1; i < app->freq_count; i++) {
+        uint32_t v = app->freqs[i];
+        size_t k = i;
+        while(k > 0 && app->freqs[k - 1] > v) {
+            app->freqs[k] = app->freqs[k - 1];
+            k--;
+        }
+        app->freqs[k] = v;
+    }
+}
+
+static uint32_t snap_frequency(App* app, uint32_t measured) {
+    uint32_t best = measured;
+    uint32_t best_diff = SNAP_HZ + 1;
+    for(size_t i = 0; i < app->freq_count; i++) {
+        uint32_t f = app->freqs[i];
+        uint32_t diff = f > measured ? f - measured : measured - f;
+        if(diff < best_diff) {
+            best_diff = diff;
+            best = f;
+        }
+    }
+    return best_diff <= SNAP_HZ ? best : measured;
+}
+
+static float measure(App* app, uint32_t f, uint8_t reads) {
+    subghz_devices_idle(app->device);
+    subghz_devices_set_frequency(app->device, f);
+    subghz_devices_set_rx(app->device);
+    furi_delay_ms(2);
+    float best = -200.0f;
+    for(uint8_t i = 0; i < reads; i++) {
+        float r = subghz_devices_get_rssi(app->device);
+        if(r > best) best = r;
+        if(i + 1 < reads) furi_delay_ms(1);
+    }
+    return best;
+}
+
+static void rx_stop(App* app) {
+    if(!app->rx_running) return;
+    if(subghz_worker_is_running(app->sworker)) {
+        subghz_worker_stop(app->sworker);
+        subghz_devices_stop_async_rx(app->device);
+    }
+    subghz_devices_idle(app->device);
+    app->rx_running = false;
+}
+
+static void rx_start(App* app, uint8_t preset, uint32_t freq) {
+    rx_stop(app);
+    subghz_devices_idle(app->device);
+    subghz_devices_load_preset(app->device, presets[preset].preset, NULL);
+    subghz_devices_set_frequency(app->device, freq);
+    subghz_devices_flush_rx(app->device);
+    subghz_devices_set_rx(app->device);
+    subghz_receiver_reset(app->receiver);
+    subghz_devices_start_async_rx(app->device, subghz_worker_rx_callback, app->sworker);
+    subghz_worker_start(app->sworker);
+    app->rx_running = true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Decoder callbacks (run on the SubGhzWorker thread)                         */
+
+static void pair_callback(void* context, bool level, uint32_t duration) {
+    App* app = context;
+    subghz_receiver_decode(app->receiver, level, duration);
+    if(!app->counting) return;
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    Analysis* an = &app->an;
+    PresetResult* p = &an->pr[an->current];
+    if(duration < 80)
+        p->pulses_glitch++;
+    else if(duration <= 20000)
+        p->pulses_ok++;
+    else
+        p->pulses_long++;
+    if(an->raw_cur_n < RAW_MAX) {
+        int32_t d = duration > 0x7FFFFFF ? 0x7FFFFFF : (int32_t)duration;
+        an->raw_cur[an->raw_cur_n++] = level ? d : -d;
+    }
+    furi_mutex_release(app->mutex);
+}
+
+static void overrun_callback(void* context) {
+    App* app = context;
+    subghz_receiver_reset(app->receiver);
+}
+
+static void receiver_callback(
+    SubGhzReceiver* receiver,
+    SubGhzProtocolDecoderBase* decoder_base,
+    void* context) {
+    App* app = context;
+    const SubGhzProtocol* protocol = decoder_base->protocol;
+    if(protocol->type != SubGhzProtocolTypeStatic && protocol->type != SubGhzProtocolTypeDynamic &&
+       protocol->type != SubGhzProtocolCustom) {
+        subghz_receiver_reset(receiver);
+        return;
+    }
+
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    Analysis* an = &app->an;
+    Candidate* c = NULL;
+    for(size_t i = 0; i < CAND_MAX; i++) {
+        if(an->cand[i].used && strcmp(an->cand[i].name, protocol->name) == 0) {
+            c = &an->cand[i];
+            break;
+        }
+    }
+    if(!c) {
+        for(size_t i = 0; i < CAND_MAX; i++) {
+            if(!an->cand[i].used) {
+                c = &an->cand[i];
+                c->used = true;
+                strlcpy(c->name, protocol->name, NAME_LEN);
+                break;
+            }
+        }
+    }
+    if(c) {
+        uint32_t hash = subghz_protocol_decoder_base_get_hash_data_long(decoder_base);
+        if(c->count > 0) {
+            if(hash == c->last_hash)
+                c->repeats++;
+            else
+                c->changes++;
+        }
+        c->count++;
+        c->last_hash = hash;
+        c->type = protocol->type;
+        c->per_preset[an->current]++;
+        c->last_preset = an->current;
+        furi_string_reset(c->info);
+        subghz_protocol_decoder_base_get_string(decoder_base, c->info);
+
+        SubGhzRadioPreset rp = {
+            .name = app->preset_name,
+            .frequency = an->freq_nominal,
+            .data = NULL,
+            .data_size = 0,
+            .latitude = NAN,
+            .longitude = NAN,
+        };
+        furi_string_set(app->preset_name, presets[an->current].name);
+        stream_clean(flipper_format_get_raw_stream(c->ff));
+        subghz_protocol_decoder_base_serialize(decoder_base, c->ff, &rp);
+        an->pr[an->current].decodes++;
+    }
+    furi_mutex_release(app->mutex);
+    if(c) feedback(app, &sequence_blink_cyan_10);
+    subghz_receiver_reset(receiver);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Analysis helpers                                                           */
+
+static void analysis_reset(App* app, bool manual, uint8_t only_preset, uint32_t freq) {
+    Analysis* an = &app->an;
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    for(size_t i = 0; i < CAND_MAX; i++) {
+        an->cand[i].used = false;
+        an->cand[i].name[0] = '\0';
+        an->cand[i].count = 0;
+        an->cand[i].repeats = 0;
+        an->cand[i].changes = 0;
+        an->cand[i].last_hash = 0;
+        memset(an->cand[i].per_preset, 0, sizeof(an->cand[i].per_preset));
+        furi_string_reset(an->cand[i].info);
+        stream_clean(flipper_format_get_raw_stream(an->cand[i].ff));
+    }
+    memset(an->pr, 0, sizeof(an->pr));
+    for(size_t i = 0; i < PRESET_COUNT; i++) an->pr[i].rssi_max = -200.0f;
+    an->manual = manual;
+    an->only_preset = only_preset;
+    an->freq_found = manual;
+    an->freq_nominal = freq;
+    an->freq_measured = freq;
+    an->rssi_peak = -200.0f;
+    an->any_activity = false;
+    an->current = 0;
+    an->raw_cur_n = 0;
+    an->raw_best_n = 0;
+    an->raw_best_preset = 0;
+    an->raw_best_score = 0;
+    an->phase = manual ? PhaseMod : PhaseFreq;
+    furi_mutex_release(app->mutex);
+}
+
+/* Best candidate: most decodes, ties by preset rank of its best preset. Call with the mutex held
+ * or after the worker stopped. */
+static int8_t best_candidate(Analysis* an) {
+    int8_t best = -1;
+    for(int8_t i = 0; i < CAND_MAX; i++) {
+        if(!an->cand[i].used || an->cand[i].count == 0) continue;
+        if(best < 0 || an->cand[i].count > an->cand[best].count) best = i;
+    }
+    return best;
+}
+
+static uint8_t best_preset_of(Candidate* c) {
+    uint8_t best = 0;
+    for(uint8_t i = 1; i < PRESET_COUNT; i++) {
+        if(c->per_preset[i] > c->per_preset[best] ||
+           (c->per_preset[i] == c->per_preset[best] && preset_rank[i] > preset_rank[best]))
+            best = i;
+    }
+    return best;
+}
+
+static uint8_t presets_with_decode(Candidate* c) {
+    uint8_t n = 0;
+    for(uint8_t i = 0; i < PRESET_COUNT; i++)
+        if(c->per_preset[i]) n++;
+    return n;
+}
+
+static const char* confidence_text(Candidate* c) {
+    if(c->count >= 3 || presets_with_decode(c) >= 2) return "magas";
+    if(c->count == 2) return "jo";
+    return "alacsony (egyszeri)";
+}
+
+static bool preset_wanted(Analysis* an, uint8_t i) {
+    return an->only_preset == 0xFF || an->only_preset == i;
+}
+
+static int8_t next_pending(Analysis* an) {
+    for(int8_t i = 0; i < PRESET_COUNT; i++)
+        if(preset_wanted(an, i) && !an->pr[i].done) return i;
+    return -1;
+}
+
+static bool preset_confirmed(Analysis* an, uint8_t preset) {
+    for(size_t i = 0; i < CAND_MAX; i++)
+        if(an->cand[i].used && an->cand[i].per_preset[preset] >= 2) return true;
+    return false;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Scan screen model                                                          */
+
+static void update_model(App* app, bool force, float rssi, const char* status, bool prompt) {
+    uint32_t now = now_ms();
+    if(!force && now - app->last_model < MODEL_EVERY_MS) return;
+    app->last_model = now;
+    Analysis* an = &app->an;
+
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    int8_t best = best_candidate(an);
+    char protocol[NAME_LEN];
+    strlcpy(protocol, best >= 0 ? an->cand[best].name : "", NAME_LEN);
+    uint8_t marks[PRESET_COUNT];
+    for(uint8_t i = 0; i < PRESET_COUNT; i++) {
+        if(!preset_wanted(an, i))
+            marks[i] = MarkSkipped;
+        else if(an->pr[i].decodes)
+            marks[i] = MarkDecoded;
+        else if(an->pr[i].done)
+            marks[i] = MarkTested;
+        else
+            marks[i] = MarkPending;
+    }
+    furi_mutex_release(app->mutex);
+
+    with_view_model(
+        app->scan_view,
+        ScanModel * m,
+        {
+            m->phase = an->phase;
+            m->freq_known = an->freq_found;
+            m->freq = an->freq_nominal;
+            m->rssi = rssi;
+            m->current = an->phase == PhaseMod ? an->current : 0xFF;
+            memcpy(m->marks, marks, sizeof(marks));
+            strlcpy(m->protocol, protocol, NAME_LEN);
+            if(status) strlcpy(m->status, status, sizeof(m->status));
+            m->prompt = prompt;
+        },
+        true);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Worker: frequency search                                                   */
+
+static bool stop_requested(void) {
+    return (furi_thread_flags_get() & (FLAG_STOP | FLAG_FINISH)) != 0;
+}
+
+static bool frequency_sweep(App* app) {
+    subghz_devices_idle(app->device);
+    subghz_devices_load_preset(app->device, FuriHalSubGhzPresetOok650Async, NULL);
+
+    float best = -200.0f;
+    uint32_t best_f = 0;
+    for(size_t i = 0; i < app->freq_count; i++) {
+        if(stop_requested()) return false;
+        float r = measure(app, app->freqs[i], 1);
+        if(r > best) {
+            best = r;
+            best_f = app->freqs[i];
+        }
+    }
+    update_model(app, true, best, "Tartsd nyomva a gombot!", false);
+    if(best < app->threshold || best_f == 0) return false;
+
+    float confirm = measure(app, best_f, 5);
+    if(confirm < app->threshold - 3.0f) return false;
+
+    update_model(app, true, confirm, "Frekvencia pontositasa", false);
+    subghz_devices_idle(app->device);
+    subghz_devices_load_preset(app->device, FuriHalSubGhzPresetCustom, app->narrow_preset);
+
+    float fine = -200.0f;
+    uint32_t fine_f = best_f;
+    for(uint32_t f = best_f - FINE_SPAN_HZ; f <= best_f + FINE_SPAN_HZ; f += FINE_STEP_HZ) {
+        if(stop_requested()) return false;
+        if(!subghz_devices_is_frequency_valid(app->device, f)) continue;
+        float r = measure(app, f, 3);
+        if(r > fine) {
+            fine = r;
+            fine_f = f;
+        }
+    }
+    uint32_t centre = fine_f;
+    for(uint32_t f = centre - FINE_STEP_HZ; f <= centre + FINE_STEP_HZ; f += FINE2_STEP_HZ) {
+        if(stop_requested()) return false;
+        if(!subghz_devices_is_frequency_valid(app->device, f)) continue;
+        float r = measure(app, f, 3);
+        if(r > fine) {
+            fine = r;
+            fine_f = f;
+        }
+    }
+    if(fine < app->threshold - 6.0f) return false;
+
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    app->an.freq_measured = fine_f;
+    app->an.freq_nominal = snap_frequency(app, fine_f);
+    app->an.rssi_peak = fine > confirm ? fine : confirm;
+    app->an.freq_found = true;
+    furi_mutex_release(app->mutex);
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Worker: modulation search                                                  */
+
+static void start_preset(App* app, uint8_t preset) {
+    app->counting = false;
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    app->an.current = preset;
+    app->an.raw_cur_n = 0;
+    furi_mutex_release(app->mutex);
+    app->win.started = false;
+    app->win.wait_since = now_ms();
+    app->win.prompted = false;
+    rx_start(app, preset, app->an.freq_nominal);
+}
+
+/* Closes the current preset; returns true when the whole search is over */
+static bool complete_preset(App* app) {
+    app->counting = false;
+    Analysis* an = &app->an;
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    PresetResult* p = &an->pr[an->current];
+    p->done = true;
+    uint32_t pulses = p->pulses_ok + p->pulses_glitch + p->pulses_long;
+    uint32_t score = p->pulses_ok >= 16 ? (p->pulses_ok * 1000) / pulses : 0;
+    if(score > an->raw_best_score && an->raw_cur_n > 0) {
+        int32_t* tmp = an->raw_best;
+        an->raw_best = an->raw_cur;
+        an->raw_best_n = an->raw_cur_n;
+        an->raw_cur = tmp;
+        an->raw_cur_n = 0;
+        an->raw_best_score = score;
+        an->raw_best_preset = an->current;
+    }
+    bool quick_done = !app->settings.all_presets && preset_confirmed(an, an->current);
+    int8_t next = quick_done ? -1 : next_pending(an);
+    furi_mutex_release(app->mutex);
+
+    if(next < 0) return true;
+    start_preset(app, next);
+    return false;
+}
+
+/* One tick of the modulation search; returns true when it is over */
+static bool modulation_tick(App* app) {
+    Analysis* an = &app->an;
+    Window* w = &app->win;
+    uint32_t now = now_ms();
+    float rssi = subghz_devices_get_rssi(app->device);
+    bool active = rssi > app->threshold;
+    PresetResult* p = &an->pr[an->current];
+    char status[40];
+    snprintf(status, sizeof(status), "Vizsgalat: %s", presets[an->current].name);
+
+    if(active) {
+        if(!w->started) {
+            furi_mutex_acquire(app->mutex, FuriWaitForever);
+            an->raw_cur_n = 0;
+            furi_mutex_release(app->mutex);
+            w->started = true;
+            w->first = now;
+            w->prompted = false;
+            app->counting = true;
+        }
+        w->last = now;
+        p->signal_seen = true;
+        an->any_activity = true;
+        if(rssi > p->rssi_max) p->rssi_max = rssi;
+        if(rssi > an->rssi_peak) an->rssi_peak = rssi;
+    }
+
+    if(!w->started) {
+        bool prompt = now - w->wait_since >= PROMPT_MS;
+        if(prompt && !w->prompted) {
+            w->prompted = true;
+            feedback(app, &sequence_single_vibro);
+        }
+        if(!an->any_activity && !an->manual && now - w->wait_since >= REFIND_MS) {
+            /* The frequency was probably noise: search again */
+            rx_stop(app);
+            an->freq_found = false;
+            an->phase = PhaseFreq;
+            update_model(app, true, rssi, "Frekvencia ujrakeresese", false);
+            return false;
+        }
+        update_model(app, false, rssi, prompt ? NULL : status, prompt);
+        return false;
+    }
+
+    uint32_t span = w->last - w->first;
+    if(span > p->span_ms) p->span_ms = span;
+    bool complete = false;
+
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    bool confirmed = preset_confirmed(an, an->current);
+    furi_mutex_release(app->mutex);
+
+    if(confirmed || now - w->first >= window_ms[app->settings.window]) {
+        complete = true;
+    } else if(now - w->last >= SILENCE_MS) {
+        /* The remote stopped sending */
+        p->attempts++;
+        if(p->decodes > 0 || span >= MIN_SPAN_MS || p->attempts >= MAX_ATTEMPTS) {
+            complete = true;
+        } else {
+            app->counting = false;
+            w->started = false;
+            w->wait_since = now - PROMPT_MS; /* ask for a new press right away */
+            w->prompted = false;
+        }
+    }
+
+    if(complete) {
+        if(complete_preset(app)) return true;
+        update_model(app, true, rssi, status, false);
+        return false;
+    }
+    update_model(app, false, rssi, status, false);
+    return false;
+}
+
+static int32_t worker_thread(void* context) {
+    App* app = context;
+    bool cancelled = false;
+    subghz_devices_begin(app->device);
+    subghz_devices_reset(app->device);
+    subghz_devices_idle(app->device);
+    app->last_model = 0;
+
+    if(app->an.phase == PhaseMod) {
+        int8_t first = next_pending(&app->an);
+        if(first >= 0) start_preset(app, first);
+    }
+    update_model(
+        app, true, -200.0f, app->an.phase == PhaseFreq ? "Tartsd nyomva a gombot!" : "Vizsgalat", false);
+
+    while(true) {
+        uint32_t flags = furi_thread_flags_wait(
+            FLAG_STOP | FLAG_FINISH, FuriFlagWaitAny, app->an.phase == PhaseMod ? TICK_MS : 0);
+        if(!(flags & FuriFlagError)) {
+            if(flags & FLAG_STOP) {
+                cancelled = true;
+                break;
+            }
+            if(flags & FLAG_FINISH) break;
+        }
+        if(app->an.phase == PhaseFreq) {
+            if(frequency_sweep(app)) {
+                app->an.phase = PhaseMod;
+                feedback(app, &sequence_blink_cyan_10);
+                int8_t first = next_pending(&app->an);
+                if(first < 0) break;
+                start_preset(app, first);
+            }
+        } else if(app->an.phase == PhaseMod) {
+            if(modulation_tick(app)) break;
+        } else {
+            break;
+        }
+    }
+
+    rx_stop(app);
+    app->counting = false;
+    subghz_devices_sleep(app->device);
+    subghz_devices_end(app->device);
+    app->an.phase = PhaseDone;
+    if(!cancelled) view_dispatcher_send_custom_event(app->vd, EvScanDone);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Main screen                                                                */
+
+static const char* const main_small_items[] = {
+    "Kezi vizsgalat",
+    "Mentett vizsgalatok",
+    "Beallitasok",
+};
+
+static void main_draw(Canvas* canvas, void* model) {
+    MainModel* m = model;
+    canvas_clear(canvas);
+    canvas_set_color(canvas, ColorBlack);
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 64, 0, AlignCenter, AlignTop, "RSC REMOTE ANALYZER");
+
+    if(m->selected == 0) {
+        canvas_draw_rbox(canvas, 3, 12, 122, 23, 3);
+        canvas_set_color(canvas, ColorWhite);
+    } else {
+        canvas_draw_rframe(canvas, 3, 12, 122, 23, 3);
+        canvas_draw_rframe(canvas, 4, 13, 120, 21, 2);
+    }
+    canvas_draw_str_aligned(canvas, 64, 15, AlignCenter, AlignTop, "Automatikus");
+    canvas_draw_str_aligned(canvas, 64, 24, AlignCenter, AlignTop, "vizsgalat");
+    canvas_set_color(canvas, ColorBlack);
+
+    canvas_set_font(canvas, FontSecondary);
+    for(uint8_t i = 0; i < COUNT_OF(main_small_items); i++) {
+        uint8_t y = 37 + i * 9;
+        if(m->selected == i + 1) {
+            canvas_draw_box(canvas, 0, y, 128, 9);
+            canvas_set_color(canvas, ColorWhite);
+        }
+        canvas_draw_str_aligned(canvas, 64, y + 1, AlignCenter, AlignTop, main_small_items[i]);
+        canvas_set_color(canvas, ColorBlack);
+    }
+}
+
+static bool main_input(InputEvent* event, void* context) {
+    App* app = context;
+    if(event->type != InputTypeShort && event->type != InputTypeRepeat) return false;
+    if(event->key == InputKeyUp || event->key == InputKeyDown) {
+        with_view_model(
+            app->main_view,
+            MainModel * m,
+            {
+                if(event->key == InputKeyUp)
+                    m->selected = (m->selected + MAIN_ITEMS - 1) % MAIN_ITEMS;
+                else
+                    m->selected = (m->selected + 1) % MAIN_ITEMS;
+            },
+            true);
+        return true;
+    }
+    if(event->key == InputKeyOk && event->type == InputTypeShort) {
+        uint8_t selected = 0;
+        with_view_model(app->main_view, MainModel * m, { selected = m->selected; }, false);
+        view_dispatcher_send_custom_event(app->vd, EvMenuAuto + selected);
+        return true;
+    }
+    return false;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Scan screen                                                                */
+
+static void scan_draw(Canvas* canvas, void* model) {
+    ScanModel* m = model;
+    char buf[40];
+    canvas_clear(canvas);
+    canvas_set_color(canvas, ColorBlack);
+
+    canvas_set_font(canvas, FontPrimary);
+    if(m->phase == PhaseFreq)
+        canvas_draw_str(canvas, 0, 9, "Frekvencia keresese");
+    else if(m->current < PRESET_COUNT) {
+        snprintf(buf, sizeof(buf), "Modulacio: %s", presets[m->current].name);
+        canvas_draw_str(canvas, 0, 9, buf);
+    } else
+        canvas_draw_str(canvas, 0, 9, "Kiertekeles");
+
+    canvas_set_font(canvas, FontSecondary);
+    if(m->freq_known)
+        format_freq(buf, sizeof(buf), m->freq);
+    else
+        strlcpy(buf, "--- MHz", sizeof(buf));
+    canvas_draw_str(canvas, 0, 19, buf);
+
+    /* Signal strength: -100 dBm .. -30 dBm */
+    canvas_draw_frame(canvas, 66, 12, 38, 7);
+    int32_t level = (int32_t)((m->rssi + 100.0f) * 36.0f / 70.0f);
+    if(level < 0) level = 0;
+    if(level > 36) level = 36;
+    if(level > 0) canvas_draw_box(canvas, 67, 13, level, 5);
+    if(m->rssi > -199.0f) {
+        snprintf(buf, sizeof(buf), "%d", (int)m->rssi);
+        canvas_draw_str_aligned(canvas, 128, 19, AlignRight, AlignBottom, buf);
+    }
+
+    for(uint8_t i = 0; i < PRESET_COUNT; i++) {
+        uint8_t x = i * 32;
+        if(m->current == i) {
+            canvas_draw_rbox(canvas, x, 21, 31, 10, 2);
+            canvas_set_color(canvas, ColorWhite);
+        } else if(m->marks[i] != MarkSkipped) {
+            canvas_draw_rframe(canvas, x, 21, 31, 10, 2);
+        }
+        canvas_draw_str_aligned(canvas, x + 16, 29, AlignCenter, AlignBottom, presets[i].name);
+        canvas_set_color(canvas, ColorBlack);
+        if(m->marks[i] == MarkDecoded) {
+            canvas_draw_box(canvas, x + 2, 32, 27, 2);
+        } else if(m->marks[i] == MarkTested) {
+            for(uint8_t d = 2; d < 29; d += 3) canvas_draw_dot(canvas, x + d, 32);
+        }
+    }
+
+    if(m->protocol[0]) {
+        snprintf(buf, sizeof(buf), "Prot: %s", m->protocol);
+    } else {
+        strlcpy(buf, m->phase == PhaseFreq ? "Prot: -" : "Prot: kereses...", sizeof(buf));
+    }
+    canvas_draw_str(canvas, 0, 42, buf);
+
+    if(m->prompt) {
+        canvas_draw_rbox(canvas, 0, 44, 128, 20, 3);
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_str_aligned(canvas, 64, 52, AlignCenter, AlignBottom, "Nyomd meg ujra a");
+        canvas_draw_str_aligned(canvas, 64, 62, AlignCenter, AlignBottom, "taviranyito gombjat!");
+        canvas_set_color(canvas, ColorBlack);
+    } else {
+        canvas_draw_str(canvas, 0, 52, m->status);
+        canvas_draw_str(canvas, 0, 62, "OK=eredmeny  Back=kilepes");
+    }
+}
+
+static bool scan_input(InputEvent* event, void* context) {
+    App* app = context;
+    if(event->type != InputTypeShort) return event->key == InputKeyBack;
+    if(event->key == InputKeyOk) {
+        view_dispatcher_send_custom_event(app->vd, EvScanFinish);
+        return true;
+    }
+    if(event->key == InputKeyBack) {
+        view_dispatcher_send_custom_event(app->vd, EvScanCancel);
+        return true;
+    }
+    return false;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Scan control                                                               */
+
+static void switch_to(App* app, ViewId view) {
+    app->current_view = view;
+    view_dispatcher_switch_to_view(app->vd, view);
+}
+
+static void scan_start(App* app, bool manual) {
+    uint32_t freq = 0;
+    uint8_t only = 0xFF;
+    if(manual) {
+        freq = app->freqs[app->manual_freq];
+        if(app->manual_preset > 0) only = app->manual_preset - 1;
+    }
+    app->threshold = (float)sensitivity_dbm[app->settings.sensitivity];
+    analysis_reset(app, manual, only, freq);
+    with_view_model(
+        app->scan_view,
+        ScanModel * m,
+        {
+            memset(m, 0, sizeof(ScanModel));
+            m->phase = app->an.phase;
+            m->rssi = -200.0f;
+            m->current = 0xFF;
+            m->freq_known = manual;
+            m->freq = freq;
+        },
+        true);
+    notification_message(app->notif, &sequence_display_backlight_enforce_on);
+    switch_to(app, ViewScan);
+    furi_thread_start(app->thread);
+}
+
+static void scan_stop(App* app, uint32_t flag) {
+    if(furi_thread_get_state(app->thread) != FuriThreadStateStopped) {
+        furi_thread_flags_set(furi_thread_get_id(app->thread), flag);
+        furi_thread_join(app->thread);
+    }
+    notification_message(app->notif, &sequence_display_backlight_enforce_auto);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Result texts                                                               */
+
+static void preset_line(FuriString* out, Analysis* an, uint8_t i) {
+    PresetResult* p = &an->pr[i];
+    furi_string_cat_printf(out, "%s: ", presets[i].name);
+    if(!preset_wanted(an, i)) {
+        furi_string_cat_str(out, "nem kert\n");
+    } else if(!p->done && !p->signal_seen) {
+        furi_string_cat_str(out, "nem vizsgalt\n");
+    } else if(p->decodes) {
+        furi_string_cat_printf(out, "%u dekodolas\n", p->decodes);
+    } else if(p->signal_seen) {
+        furi_string_cat_printf(
+            out, "jel %lu ms, nincs dekodolas\n", (unsigned long)p->span_ms);
+    } else {
+        furi_string_cat_str(out, "nem kapott jelet\n");
+    }
+}
+
+/* In automatic mode a found frequency means a signal; in manual mode only real activity counts */
+static bool signal_detected(Analysis* an) {
+    return an->any_activity || (!an->manual && an->freq_found);
+}
+
+static void build_result(App* app) {
+    Analysis* an = &app->an;
+    app->best = best_candidate(an);
+    FuriString* s = app->summary;
+    furi_string_reset(s);
+
+    if(app->best >= 0) {
+        Candidate* c = &an->cand[app->best];
+        uint8_t bp = best_preset_of(c);
+        furi_string_cat_printf(s, "\e#%s\e#\n", c->name);
+        furi_string_cat_printf(s, "%s\n", type_text(c->type));
+        format_freq_long(s, an->freq_nominal);
+        furi_string_cat_printf(s, "  %s\n", presets[bp].name);
+        furi_string_cat_printf(s, "Megbizhatosag: %s\n", confidence_text(c));
+        if(c->type == SubGhzProtocolTypeDynamic)
+            furi_string_cat_str(s, "Parositas szukseges a vevovel.\n");
+        /* The first line of the decoder text usually holds the key */
+        size_t nl = furi_string_search_char(c->info, '\n');
+        if(nl != FURI_STRING_FAILURE) {
+            FuriString* rest = furi_string_alloc_set(c->info);
+            furi_string_right(rest, nl + 1);
+            size_t nl2 = furi_string_search_char(rest, '\n');
+            if(nl2 != FURI_STRING_FAILURE) furi_string_left(rest, nl2);
+            furi_string_cat_printf(s, "%s\n", furi_string_get_cstr(rest));
+            furi_string_free(rest);
+        }
+    } else if(signal_detected(an)) {
+        furi_string_cat_str(s, "\e#Ismeretlen protokoll\e#\n");
+        furi_string_cat_str(s, "tovabbi vizsgalat szukseges.\n");
+        furi_string_cat_str(s, "Jel: ");
+        format_freq_long(s, an->freq_nominal);
+        furi_string_cat_printf(s, ", %d dBm\n", (int)an->rssi_peak);
+        if(an->raw_best_score > 0)
+            furi_string_cat_printf(
+                s, "Valoszinu: %s (nem biztos)\n", presets[an->raw_best_preset].name);
+        furi_string_cat_str(s, "Fix vagy ugrokod: nem tudhato.\n");
+    } else {
+        furi_string_cat_str(s, "\e#Nem erkezett jel\e#\n");
+        furi_string_cat_str(s, "Tartsd a taviranyitot a Flipper\nkozeleben, es nyomd meg a\n");
+        furi_string_cat_str(s, "gombjat a vizsgalat alatt.\n");
+    }
+
+    if(app->best >= 0)
+        feedback(app, &sequence_success);
+    else
+        feedback(app, &sequence_double_vibro);
+}
+
+static void result_button(GuiButtonType button, InputType type, void* context);
+
+static void show_result(App* app) {
+    widget_reset(app->result);
+    widget_add_text_scroll_element(app->result, 0, 0, 128, 51, furi_string_get_cstr(app->summary));
+    widget_add_button_element(app->result, GuiButtonTypeLeft, "Uj", result_button, app);
+    bool can_save = app->best >= 0 || signal_detected(&app->an);
+    if(can_save) widget_add_button_element(app->result, GuiButtonTypeCenter, "Mentes", result_button, app);
+    widget_add_button_element(app->result, GuiButtonTypeRight, "Tobb", result_button, app);
+    switch_to(app, ViewResult);
+}
+
+static void result_button(GuiButtonType button, InputType type, void* context) {
+    App* app = context;
+    if(type != InputTypeShort) return;
+    if(button == GuiButtonTypeLeft)
+        view_dispatcher_send_custom_event(app->vd, EvResultNew);
+    else if(button == GuiButtonTypeCenter)
+        view_dispatcher_send_custom_event(app->vd, EvResultSave);
+    else if(button == GuiButtonTypeRight)
+        view_dispatcher_send_custom_event(app->vd, EvResultMore);
+}
+
+static void detail_data_text(App* app, FuriString* out) {
+    Analysis* an = &app->an;
+    furi_string_reset(out);
+    if(app->best < 0) {
+        furi_string_cat_str(out, "Nincs dekodolt adat.\n\n");
+        if(an->freq_found) {
+            furi_string_cat_str(out, "Mert frekvencia: ");
+            format_freq_long(out, an->freq_measured);
+            furi_string_cat_str(out, "\nHasznalt frekvencia: ");
+            format_freq_long(out, an->freq_nominal);
+            furi_string_cat_printf(out, "\nCsucs jelszint: %d dBm\n", (int)an->rssi_peak);
+        }
+        if(an->raw_best_n)
+            furi_string_cat_printf(
+                out,
+                "RAW felvetel: %u ertek (%s)\nMentheto, a Sub-GHz appban\nvagy ProtoView-ban vizsgalhato.\n",
+                (unsigned)an->raw_best_n,
+                presets[an->raw_best_preset].name);
+        return;
+    }
+    Candidate* c = &an->cand[app->best];
+    furi_string_cat_printf(out, "%s (%s)\n", c->name, type_text(c->type));
+    furi_string_cat(out, c->info);
+    furi_string_cat_str(out, "\n\nMert frekvencia: ");
+    format_freq_long(out, an->freq_measured);
+    furi_string_cat_printf(out, "\nCsucs jelszint: %d dBm\n", (int)an->rssi_peak);
+    furi_string_cat_printf(out, "Dekodolasok: %u\n", c->count);
+    furi_string_cat_printf(out, "Azonos ismetles: %u\n", c->repeats);
+    furi_string_cat_printf(out, "Elterokod: %u\n", c->changes);
+    for(int8_t i = 0; i < CAND_MAX; i++) {
+        if(i == app->best || !an->cand[i].used) continue;
+        furi_string_cat_printf(
+            out, "Mas protokoll is: %s (%u)\n", an->cand[i].name, an->cand[i].count);
+    }
+}
+
+static void detail_modulation_text(App* app, FuriString* out) {
+    Analysis* an = &app->an;
+    furi_string_reset(out);
+    furi_string_cat_str(out, "Vetelei beallitasok:\n");
+    for(uint8_t i = 0; i < PRESET_COUNT; i++) preset_line(out, an, i);
+    if(app->best >= 0) {
+        furi_string_cat_printf(
+            out,
+            "\nLegvaloszinubb: %s\n(a legtobb dekodolas)\n",
+            presets[best_preset_of(&an->cand[app->best])].name);
+    } else if(an->raw_best_score > 0) {
+        furi_string_cat_printf(
+            out,
+            "\nValoszinu: %s\n(impulzusminta alapjan,\nnem biztos)\n",
+            presets[an->raw_best_preset].name);
+    }
+    furi_string_cat_str(
+        out,
+        "\nJelek a kepernyon:\nteli csik = dekodolt,\npontozott = vizsgalt, nincs\ndekodolas.\n");
+}
+
+static void detail_compat_text(App* app, FuriString* out) {
+    Analysis* an = &app->an;
+    furi_string_reset(out);
+    if(app->best < 0) {
+        furi_string_cat_str(
+            out,
+            "Ismeretlen protokoll - tovabbi\nvizsgalat szukseges.\n\n"
+            "Nem tudhato, hogy fix vagy\nugrokodos. A jel fogasa nem\nazonos a protokoll\n"
+            "felismeresevel.\n\nA RAW felvetel a Sub-GHz\nappban (Read RAW) vagy\n"
+            "ProtoView-ban tovabb\nvizsgalhato.\n");
+        return;
+    }
+    Candidate* c = &an->cand[app->best];
+    if(c->type == SubGhzProtocolTypeDynamic) {
+        furi_string_cat_str(
+            out,
+            "Ugrokodos protokoll.\n\n"
+            "Egyszeru rogzitessel es\nvisszajatszassal nem\nmasolhato: minden gombnyomas\n"
+            "uj kodot kuld.\n\nUj taviranyitot a vevoegyseg\nkezikonyve szerint, a vevovel\n"
+            "parositva lehet hasznalni.\n\nA mentes csak az elemzest\nrogziti (.sub nem keszul).\n");
+    } else if(c->type == SubGhzProtocolTypeStatic) {
+        furi_string_cat_str(
+            out,
+            "Fix kodos protokoll.\n\n"
+            "A kod minden gombnyomasnal\nugyanaz. Mentes utan a .sub\nfajl a Sub-GHz appban\n"
+            "(Saved) megnyithato.\n\nKuldeni csak sajat rendszeren,\na helyi szabalyok szerint\n"
+            "szabad.\n");
+    } else {
+        furi_string_cat_str(
+            out,
+            "A protokoll mukodese (fix vagy\nugrokod) nem allapithato meg\nbiztosan.\n");
+    }
+    furi_string_cat_printf(out, "\nMegbizhatosag: %s\n", confidence_text(c));
+}
+
+static void show_text(App* app, ViewId back) {
+    text_box_reset(app->text_box);
+    text_box_set_font(app->text_box, TextBoxFontText);
+    text_box_set_text(app->text_box, furi_string_get_cstr(app->text));
+    app->text_return = back;
+    switch_to(app, ViewText);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Saving                                                                     */
+
+static void sanitize_name(char* name) {
+    for(char* p = name; *p; p++) {
+        if(*p == '/' || *p == '\\' || *p == ':' || *p == '*' || *p == '?' || *p == '"' ||
+           *p == '<' || *p == '>' || *p == '|')
+            *p = '_';
+    }
+    if(!name[0]) strlcpy(name, "remote", NAME_LEN);
+}
+
+static void default_name(App* app) {
+    DateTime dt;
+    furi_hal_rtc_get_datetime(&dt);
+    snprintf(
+        app->name_buf,
+        NAME_LEN,
+        "RA_%02u%02u_%02u%02u",
+        dt.month,
+        dt.day,
+        dt.hour,
+        dt.minute);
+}
+
+static bool write_text_file(App* app, const char* path, FuriString* text) {
+    Stream* stream = file_stream_alloc(app->storage);
+    bool ok = file_stream_open(stream, path, FSAM_WRITE, FSOM_CREATE_ALWAYS);
+    if(ok) ok = stream_write_string(stream, text) == furi_string_size(text);
+    file_stream_close(stream);
+    stream_free(stream);
+    return ok;
+}
+
+static bool write_raw_sub(App* app, const char* path) {
+    Analysis* an = &app->an;
+    FlipperFormat* ff = flipper_format_file_alloc(app->storage);
+    FuriString* preset = furi_string_alloc();
+    subghz_block_generic_get_preset_name(presets[an->raw_best_preset].name, preset);
+    bool ok = flipper_format_file_open_always(ff, path) &&
+              flipper_format_write_header_cstr(ff, SUBGHZ_RAW_FILE_TYPE, SUBGHZ_RAW_FILE_VERSION) &&
+              flipper_format_write_uint32(ff, "Frequency", &an->freq_nominal, 1) &&
+              flipper_format_write_string(ff, "Preset", preset) &&
+              flipper_format_write_string_cstr(ff, "Protocol", "RAW");
+    for(size_t i = 0; ok && i < an->raw_best_n; i += 256) {
+        size_t n = an->raw_best_n - i;
+        if(n > 256) n = 256;
+        ok = flipper_format_write_int32(ff, "RAW_Data", &an->raw_best[i], n);
+    }
+    furi_string_free(preset);
+    flipper_format_free(ff);
+    return ok;
+}
+
+static void build_report(App* app, FuriString* r, const char* name, const char* sub_path) {
+    Analysis* an = &app->an;
+    DateTime dt;
+    furi_hal_rtc_get_datetime(&dt);
+    furi_string_reset(r);
+    furi_string_cat_printf(r, "Filetype: %s\nVersion: 1\n", REPORT_FILE_TYPE);
+    furi_string_cat_printf(
+        r,
+        "Date: %04u-%02u-%02u %02u:%02u:%02u\n",
+        dt.year,
+        dt.month,
+        dt.day,
+        dt.hour,
+        dt.minute,
+        dt.second);
+    furi_string_cat_printf(r, "Name: %s\n", name);
+    furi_string_cat_printf(r, "Mode: %s\n", an->manual ? "Manual" : "Automatic");
+    furi_string_cat_printf(r, "Frequency: %lu\n", (unsigned long)an->freq_nominal);
+    furi_string_cat_printf(r, "Measured_frequency: %lu\n", (unsigned long)an->freq_measured);
+    furi_string_cat_printf(r, "RSSI_peak: %d\n", (int)an->rssi_peak);
+    if(app->best >= 0) {
+        Candidate* c = &an->cand[app->best];
+        furi_string_cat_printf(r, "Identification: Decoded\n");
+        furi_string_cat_printf(r, "Protocol: %s\n", c->name);
+        furi_string_cat_printf(r, "Protocol_type: %s\n", type_key(c->type));
+        furi_string_cat_printf(r, "Modulation: %s\n", presets[best_preset_of(c)].name);
+        furi_string_cat_printf(r, "Confidence: %s\n", confidence_text(c));
+        furi_string_cat_printf(
+            r, "Decodes: %u\nRepeats: %u\nChanges: %u\n", c->count, c->repeats, c->changes);
+    } else {
+        furi_string_cat_printf(r, "Identification: Unknown\n");
+        if(an->raw_best_score > 0)
+            furi_string_cat_printf(
+                r, "Modulation_guess: %s\n", presets[an->raw_best_preset].name);
+    }
+    for(uint8_t i = 0; i < PRESET_COUNT; i++) {
+        PresetResult* p = &an->pr[i];
+        furi_string_cat_printf(
+            r,
+            "Preset_%s: tested=%u decodes=%u signal_ms=%lu rssi=%d\n",
+            presets[i].name,
+            p->done ? 1 : 0,
+            p->decodes,
+            (unsigned long)p->span_ms,
+            p->signal_seen ? (int)p->rssi_max : -200);
+    }
+    furi_string_cat_printf(r, "Sub_file: %s\n", sub_path[0] ? sub_path : "-");
+    if(app->best >= 0) {
+        furi_string_cat_str(r, "# Decoded data:\n");
+        FuriString* info = furi_string_alloc_set(an->cand[app->best].info);
+        furi_string_replace_all(info, "\r", "");
+        furi_string_cat_str(r, "# ");
+        for(size_t i = 0; i < furi_string_size(info); i++) {
+            char ch = furi_string_get_char(info, i);
+            if(ch == '\n')
+                furi_string_cat_str(r, "\n# ");
+            else
+                furi_string_push_back(r, ch);
+        }
+        furi_string_cat_str(r, "\n");
+        furi_string_free(info);
+    }
+}
+
+static void do_save(App* app) {
+    sanitize_name(app->name_buf);
+    storage_simply_mkdir(app->storage, DATA_DIR);
+    storage_simply_mkdir(app->storage, REPORT_DIR);
+
+    /* Find a free name for both files */
+    char name[NAME_LEN + 4];
+    FuriString* report_path = furi_string_alloc();
+    FuriString* sub_path = furi_string_alloc();
+    strlcpy(name, app->name_buf, sizeof(name));
+    for(uint8_t n = 2; n < 100; n++) {
+        furi_string_printf(report_path, "%s/%s.txt", REPORT_DIR, name);
+        furi_string_printf(sub_path, "%s/%s.sub", SUB_DIR, name);
+        if(!storage_file_exists(app->storage, furi_string_get_cstr(report_path)) &&
+           !storage_file_exists(app->storage, furi_string_get_cstr(sub_path)))
+            break;
+        snprintf(name, sizeof(name), "%s_%u", app->name_buf, n);
+    }
+
+    Analysis* an = &app->an;
+    bool sub_written = false;
+    bool sub_ok = true;
+    const char* sub_note = "";
+    if(app->best >= 0) {
+        Candidate* c = &an->cand[app->best];
+        if(c->type == SubGhzProtocolTypeDynamic) {
+            sub_note = "Ugrokodos: .sub nem keszult.";
+        } else {
+            storage_simply_mkdir(app->storage, EXT_PATH("subghz"));
+            storage_simply_mkdir(app->storage, SUB_DIR);
+            Stream* src = flipper_format_get_raw_stream(c->ff);
+            stream_rewind(src);
+            sub_ok = stream_save_to_file(
+                         src, app->storage, furi_string_get_cstr(sub_path), FSOM_CREATE_ALWAYS) > 0;
+            sub_written = sub_ok;
+        }
+    } else if(an->raw_best_n > 0) {
+        storage_simply_mkdir(app->storage, EXT_PATH("subghz"));
+        storage_simply_mkdir(app->storage, SUB_DIR);
+        sub_ok = write_raw_sub(app, furi_string_get_cstr(sub_path));
+        sub_written = sub_ok;
+        sub_note = "RAW felvetel (elemzeshez).";
+    } else {
+        sub_note = "Nincs mentheto jel.";
+    }
+
+    FuriString* report = furi_string_alloc();
+    build_report(app, report, name, sub_written ? furi_string_get_cstr(sub_path) : "");
+    bool report_ok = write_text_file(app, furi_string_get_cstr(report_path), report);
+    furi_string_free(report);
+
+    furi_string_reset(app->text);
+    if(report_ok && sub_ok) {
+        furi_string_cat_printf(app->text, "Mentve: %s\n\nJelentes:\n%s\n", name, furi_string_get_cstr(report_path));
+        if(sub_written)
+            furi_string_cat_printf(app->text, "\nJel:\n%s\n", furi_string_get_cstr(sub_path));
+        if(sub_note[0]) furi_string_cat_printf(app->text, "\n%s\n", sub_note);
+        if(sub_written && app->best >= 0)
+            furi_string_cat_str(app->text, "\nA Sub-GHz app Saved\nmenujeben is megtalalhato.\n");
+    } else {
+        furi_string_cat_str(app->text, "Mentesi hiba!\nEllenorizd az SD-kartyat.\n");
+    }
+    furi_string_free(report_path);
+    furi_string_free(sub_path);
+    show_text(app, ViewResult);
+}
+
+static void show_saved(App* app) {
+    storage_simply_mkdir(app->storage, DATA_DIR);
+    storage_simply_mkdir(app->storage, REPORT_DIR);
+    FuriString* path = furi_string_alloc_set(REPORT_DIR);
+    DialogsFileBrowserOptions opts;
+    dialog_file_browser_set_basic_options(&opts, ".txt", NULL);
+    opts.base_path = REPORT_DIR;
+    opts.hide_ext = true;
+    bool selected = dialog_file_browser_show(app->dialogs, path, path, &opts);
+    if(selected) {
+        furi_string_reset(app->text);
+        Stream* stream = file_stream_alloc(app->storage);
+        if(file_stream_open(stream, furi_string_get_cstr(path), FSAM_READ, FSOM_OPEN_EXISTING)) {
+            FuriString* line = furi_string_alloc();
+            while(stream_read_line(stream, line) && furi_string_size(app->text) < 4096) {
+                furi_string_cat(app->text, line);
+            }
+            furi_string_free(line);
+        } else {
+            furi_string_set(app->text, "A fajl nem olvashato.");
+        }
+        file_stream_close(stream);
+        stream_free(stream);
+        show_text(app, ViewMain);
+    }
+    furi_string_free(path);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Settings and manual screens                                                */
+
+static void set_sensitivity(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    uint8_t i = variable_item_get_current_value_index(item);
+    app->settings.sensitivity = i;
+    variable_item_set_current_value_text(item, sensitivity_names[i]);
+    settings_save(app);
+}
+
+static void set_window(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    uint8_t i = variable_item_get_current_value_index(item);
+    app->settings.window = i;
+    variable_item_set_current_value_text(item, window_names[i]);
+    settings_save(app);
+}
+
+static void set_all_presets(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    uint8_t i = variable_item_get_current_value_index(item);
+    app->settings.all_presets = i;
+    variable_item_set_current_value_text(item, yes_no[i]);
+    settings_save(app);
+}
+
+static void set_feedback(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    uint8_t i = variable_item_get_current_value_index(item);
+    app->settings.feedback = i;
+    variable_item_set_current_value_text(item, on_off[i]);
+    settings_save(app);
+}
+
+static void build_settings_list(App* app) {
+    VariableItemList* list = app->settings_list;
+    variable_item_list_reset(list);
+    VariableItem* item;
+    item = variable_item_list_add(list, "Erzekenyseg", COUNT_OF(sensitivity_names), set_sensitivity, app);
+    variable_item_set_current_value_index(item, app->settings.sensitivity);
+    variable_item_set_current_value_text(item, sensitivity_names[app->settings.sensitivity]);
+    item = variable_item_list_add(list, "Ablak/preset", COUNT_OF(window_names), set_window, app);
+    variable_item_set_current_value_index(item, app->settings.window);
+    variable_item_set_current_value_text(item, window_names[app->settings.window]);
+    item = variable_item_list_add(list, "Mind a 4 preset", COUNT_OF(yes_no), set_all_presets, app);
+    variable_item_set_current_value_index(item, app->settings.all_presets);
+    variable_item_set_current_value_text(item, yes_no[app->settings.all_presets]);
+    item = variable_item_list_add(list, "Visszajelzes", COUNT_OF(on_off), set_feedback, app);
+    variable_item_set_current_value_index(item, app->settings.feedback);
+    variable_item_set_current_value_text(item, on_off[app->settings.feedback]);
+    item = variable_item_list_add(list, "Verzio", 1, NULL, app);
+    variable_item_set_current_value_text(item, APP_VERSION);
+}
+
+static void set_manual_freq(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    app->manual_freq = variable_item_get_current_value_index(item);
+    char buf[20];
+    format_freq(buf, sizeof(buf), app->freqs[app->manual_freq]);
+    variable_item_set_current_value_text(item, buf);
+}
+
+static void set_manual_preset(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    app->manual_preset = variable_item_get_current_value_index(item);
+    variable_item_set_current_value_text(item, manual_preset_names[app->manual_preset]);
+}
+
+static void manual_enter(void* context, uint32_t index) {
+    App* app = context;
+    if(index == 2) view_dispatcher_send_custom_event(app->vd, EvManualStart);
+}
+
+static void build_manual_list(App* app) {
+    VariableItemList* list = app->manual_list;
+    variable_item_list_reset(list);
+    char buf[20];
+    VariableItem* item = variable_item_list_add(list, "Frekvencia", app->freq_count, set_manual_freq, app);
+    variable_item_set_current_value_index(item, app->manual_freq);
+    format_freq(buf, sizeof(buf), app->freqs[app->manual_freq]);
+    variable_item_set_current_value_text(item, buf);
+    item = variable_item_list_add(
+        list, "Modulacio", COUNT_OF(manual_preset_names), set_manual_preset, app);
+    variable_item_set_current_value_index(item, app->manual_preset);
+    variable_item_set_current_value_text(item, manual_preset_names[app->manual_preset]);
+    item = variable_item_list_add(list, "Inditas (OK)", 1, NULL, app);
+    variable_item_set_current_value_text(item, ">");
+    variable_item_list_set_enter_callback(list, manual_enter, app);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Navigation and events                                                      */
+
+static void details_callback(void* context, uint32_t index) {
+    App* app = context;
+    view_dispatcher_send_custom_event(app->vd, index);
+}
+
+static void name_done(void* context) {
+    App* app = context;
+    view_dispatcher_send_custom_event(app->vd, EvNameDone);
+}
+
+static bool navigation_callback(void* context) {
+    App* app = context;
+    switch(app->current_view) {
+    case ViewMain:
+        return false; /* exit the app */
+    case ViewScan:
+        view_dispatcher_send_custom_event(app->vd, EvScanCancel);
+        return true;
+    case ViewResult:
+    case ViewSettings:
+    case ViewManual:
+        switch_to(app, ViewMain);
+        return true;
+    case ViewDetails:
+    case ViewTextInput:
+        switch_to(app, ViewResult);
+        return true;
+    case ViewText:
+        switch_to(app, app->text_return);
+        return true;
+    }
+    return false;
+}
+
+static bool custom_event_callback(void* context, uint32_t event) {
+    App* app = context;
+    switch(event) {
+    case EvMenuAuto:
+        scan_start(app, false);
+        return true;
+    case EvMenuManual:
+        if(app->freq_count == 0) return true;
+        build_manual_list(app);
+        switch_to(app, ViewManual);
+        return true;
+    case EvManualStart:
+        scan_start(app, true);
+        return true;
+    case EvMenuSaved:
+        show_saved(app);
+        return true;
+    case EvMenuSettings:
+        build_settings_list(app);
+        switch_to(app, ViewSettings);
+        return true;
+    case EvScanDone:
+        furi_thread_join(app->thread);
+        notification_message(app->notif, &sequence_display_backlight_enforce_auto);
+        build_result(app);
+        show_result(app);
+        return true;
+    case EvScanFinish:
+        scan_stop(app, FLAG_FINISH); /* the worker sends EvScanDone */
+        return true;
+    case EvScanCancel:
+        scan_stop(app, FLAG_STOP);
+        switch_to(app, ViewMain);
+        return true;
+    case EvResultNew:
+        scan_start(app, app->an.manual);
+        return true;
+    case EvResultSave:
+        default_name(app);
+        text_input_reset(app->text_input);
+        text_input_set_header_text(app->text_input, "Nev a menteshez");
+        text_input_set_result_callback(
+            app->text_input, name_done, app, app->name_buf, NAME_LEN, false);
+        switch_to(app, ViewTextInput);
+        return true;
+    case EvNameDone:
+        do_save(app);
+        return true;
+    case EvResultMore:
+        submenu_reset(app->details);
+        submenu_set_header(app->details, "Reszletek");
+        submenu_add_item(app->details, "Reszletes adatok", EvDetailData, details_callback, app);
+        submenu_add_item(app->details, "Modulaciok", EvDetailModulation, details_callback, app);
+        submenu_add_item(app->details, "Kompatibilitas", EvDetailCompat, details_callback, app);
+        switch_to(app, ViewDetails);
+        return true;
+    case EvDetailData:
+        detail_data_text(app, app->text);
+        show_text(app, ViewDetails);
+        return true;
+    case EvDetailModulation:
+        detail_modulation_text(app, app->text);
+        show_text(app, ViewDetails);
+        return true;
+    case EvDetailCompat:
+        detail_compat_text(app, app->text);
+        show_text(app, ViewDetails);
+        return true;
+    }
+    return false;
+}
+
+/* ------------------------------------------------------------------------- */
+/* App lifecycle                                                              */
+
+static App* app_alloc(void) {
+    App* app = malloc(sizeof(App));
+    memset(app, 0, sizeof(App));
+    app->gui = furi_record_open(RECORD_GUI);
+    app->notif = furi_record_open(RECORD_NOTIFICATION);
+    app->storage = furi_record_open(RECORD_STORAGE);
+    app->dialogs = furi_record_open(RECORD_DIALOGS);
+    app->text = furi_string_alloc();
+    app->summary = furi_string_alloc();
+    app->preset_name = furi_string_alloc();
+    app->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+    app->best = -1;
+    settings_load(app);
+
+    /* Radio and decoders */
+    subghz_devices_init();
+    app->device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+    app->setting = subghz_setting_alloc();
+    subghz_setting_load(app->setting, EXT_PATH("subghz/assets/setting_user"));
+    build_frequency_list(app);
+    for(size_t i = 0; i < app->freq_count; i++)
+        if(app->freqs[i] == 433920000) app->manual_freq = i;
+    app->narrow_preset = build_narrow_preset();
+
+    app->env = subghz_environment_alloc();
+    subghz_environment_load_keystore(app->env, SUBGHZ_KEYSTORE_DIR_NAME);
+    subghz_environment_load_keystore(app->env, SUBGHZ_KEYSTORE_DIR_USER_NAME);
+    subghz_environment_set_came_atomo_rainbow_table_file_name(app->env, SUBGHZ_CAME_ATOMO_DIR_NAME);
+    subghz_environment_set_alutech_at_4n_rainbow_table_file_name(
+        app->env, SUBGHZ_ALUTECH_AT_4N_DIR_NAME);
+    subghz_environment_set_nice_flor_s_rainbow_table_file_name(
+        app->env, SUBGHZ_NICE_FLOR_S_DIR_NAME);
+    subghz_environment_set_protocol_registry(app->env, (void*)&subghz_protocol_registry);
+    app->receiver = subghz_receiver_alloc_init(app->env);
+    subghz_receiver_set_filter(app->receiver, SubGhzProtocolFlag_Decodable);
+    subghz_receiver_set_ignore_filter(
+        app->receiver, SubGhzProtocolFilter_Weather | SubGhzProtocolFilter_TPMS);
+    subghz_receiver_set_rx_callback(app->receiver, receiver_callback, app);
+
+    app->sworker = subghz_worker_alloc();
+    subghz_worker_set_overrun_callback(app->sworker, overrun_callback);
+    subghz_worker_set_pair_callback(app->sworker, pair_callback);
+    subghz_worker_set_context(app->sworker, app);
+
+    for(size_t i = 0; i < CAND_MAX; i++) {
+        app->an.cand[i].info = furi_string_alloc();
+        app->an.cand[i].ff = flipper_format_string_alloc();
+    }
+    app->an.raw_cur = malloc(RAW_MAX * sizeof(int32_t));
+    app->an.raw_best = malloc(RAW_MAX * sizeof(int32_t));
+
+    app->thread = furi_thread_alloc_ex("RscRemoteAnalyzerWorker", 4096, worker_thread, app);
+
+    /* GUI */
+    app->vd = view_dispatcher_alloc();
+    view_dispatcher_set_event_callback_context(app->vd, app);
+    view_dispatcher_set_custom_event_callback(app->vd, custom_event_callback);
+    view_dispatcher_set_navigation_event_callback(app->vd, navigation_callback);
+    view_dispatcher_attach_to_gui(app->vd, app->gui, ViewDispatcherTypeFullscreen);
+
+    app->main_view = view_alloc();
+    view_allocate_model(app->main_view, ViewModelTypeLocking, sizeof(MainModel));
+    view_set_context(app->main_view, app);
+    view_set_draw_callback(app->main_view, main_draw);
+    view_set_input_callback(app->main_view, main_input);
+    view_dispatcher_add_view(app->vd, ViewMain, app->main_view);
+
+    app->scan_view = view_alloc();
+    view_allocate_model(app->scan_view, ViewModelTypeLocking, sizeof(ScanModel));
+    view_set_context(app->scan_view, app);
+    view_set_draw_callback(app->scan_view, scan_draw);
+    view_set_input_callback(app->scan_view, scan_input);
+    view_dispatcher_add_view(app->vd, ViewScan, app->scan_view);
+
+    app->result = widget_alloc();
+    view_dispatcher_add_view(app->vd, ViewResult, widget_get_view(app->result));
+    app->details = submenu_alloc();
+    view_dispatcher_add_view(app->vd, ViewDetails, submenu_get_view(app->details));
+    app->text_box = text_box_alloc();
+    view_dispatcher_add_view(app->vd, ViewText, text_box_get_view(app->text_box));
+    app->text_input = text_input_alloc();
+    view_dispatcher_add_view(app->vd, ViewTextInput, text_input_get_view(app->text_input));
+    app->settings_list = variable_item_list_alloc();
+    view_dispatcher_add_view(
+        app->vd, ViewSettings, variable_item_list_get_view(app->settings_list));
+    app->manual_list = variable_item_list_alloc();
+    view_dispatcher_add_view(app->vd, ViewManual, variable_item_list_get_view(app->manual_list));
+
+    return app;
+}
+
+static void app_free(App* app) {
+    scan_stop(app, FLAG_STOP);
+    furi_thread_free(app->thread);
+
+    view_dispatcher_remove_view(app->vd, ViewMain);
+    view_dispatcher_remove_view(app->vd, ViewScan);
+    view_dispatcher_remove_view(app->vd, ViewResult);
+    view_dispatcher_remove_view(app->vd, ViewDetails);
+    view_dispatcher_remove_view(app->vd, ViewText);
+    view_dispatcher_remove_view(app->vd, ViewTextInput);
+    view_dispatcher_remove_view(app->vd, ViewSettings);
+    view_dispatcher_remove_view(app->vd, ViewManual);
+    view_free(app->main_view);
+    view_free(app->scan_view);
+    widget_free(app->result);
+    submenu_free(app->details);
+    text_box_free(app->text_box);
+    text_input_free(app->text_input);
+    variable_item_list_free(app->settings_list);
+    variable_item_list_free(app->manual_list);
+    view_dispatcher_free(app->vd);
+
+    subghz_worker_free(app->sworker);
+    subghz_receiver_free(app->receiver);
+    subghz_environment_free(app->env);
+    subghz_setting_free(app->setting);
+    subghz_devices_deinit();
+    free(app->narrow_preset);
+    for(size_t i = 0; i < CAND_MAX; i++) {
+        furi_string_free(app->an.cand[i].info);
+        flipper_format_free(app->an.cand[i].ff);
+    }
+    free(app->an.raw_cur);
+    free(app->an.raw_best);
+
+    furi_mutex_free(app->mutex);
+    furi_string_free(app->text);
+    furi_string_free(app->summary);
+    furi_string_free(app->preset_name);
+    furi_record_close(RECORD_DIALOGS);
+    furi_record_close(RECORD_STORAGE);
+    furi_record_close(RECORD_NOTIFICATION);
+    furi_record_close(RECORD_GUI);
+    free(app);
+}
+
+int32_t rsc_remote_analyzer_app(void* p) {
+    UNUSED(p);
+    App* app = app_alloc();
+    switch_to(app, ViewMain);
+    view_dispatcher_run(app->vd);
+    app_free(app);
+    return 0;
+}
