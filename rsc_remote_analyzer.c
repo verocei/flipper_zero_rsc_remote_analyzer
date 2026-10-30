@@ -10,6 +10,7 @@
  * Receive only: the app never transmits.
  */
 
+#include <stdarg.h>
 #include <furi.h>
 #include <furi_hal.h>
 #include <gui/gui.h>
@@ -44,11 +45,12 @@
 #define TAG "RscRemoteAnalyzer"
 
 #define APP_NAME    "RSC Remote Analyzer"
-#define APP_VERSION "0.2"
+#define APP_VERSION "0.3"
 
 #define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
 #define REPORT_DIR    DATA_DIR "/reports"
 #define SETTINGS_PATH DATA_DIR "/settings.txt"
+#define TRACE_PATH    DATA_DIR "/debug_log.txt"
 #define SUB_DIR       EXT_PATH("subghz/rsc_remote_analyzer")
 
 #define SETTINGS_FILE_TYPE "RSC Remote Analyzer Settings"
@@ -68,6 +70,13 @@
 #define MAX_ATTEMPTS   2 /* ... or after this many short presses */
 #define REFIND_MS      5000 /* no signal at all on the found frequency: search again */
 #define MODEL_EVERY_MS 50
+#define ACTIVE_BELOW_DB 10.0f /* a press counts from this far below the found level ... */
+#define ACTIVE_MIN_DB   10.0f /* ... but at most this far below the sensitivity setting */
+
+/* Debug log: the last TRACE_LINES lines of a scan, written to TRACE_PATH when it ends */
+#define TRACE_LINES    200
+#define TRACE_LEN      56
+#define TRACE_EVERY_MS 100
 
 /* Fine frequency search */
 #define FINE_SPAN_HZ   300000
@@ -127,6 +136,7 @@ typedef struct {
     uint32_t window; /* index into window_ms */
     uint32_t all_presets; /* 1 = always try all four presets */
     uint32_t feedback; /* 1 = vibro/LED feedback */
+    uint32_t debug_log; /* 1 = write the debug log of every scan */
     uint32_t language; /* LANG_EN or LANG_HU */
 } Settings;
 
@@ -293,7 +303,12 @@ typedef struct {
     Window win;
     volatile bool counting;
     float threshold;
+    float active_threshold; /* what counts as a press in the modulation search */
     uint32_t last_model;
+    uint32_t scan_t0;
+    char (*trace)[TRACE_LEN];
+    uint32_t trace_n;
+    uint32_t last_trace;
     FuriString* preset_name;
     int8_t best;
 } App;
@@ -303,6 +318,19 @@ typedef struct {
 
 static uint32_t now_ms(void) {
     return furi_get_tick() * 1000 / furi_kernel_get_tick_frequency();
+}
+
+/* One line of the debug log (worker thread only; saved after the worker stopped) */
+static void trace(App* app, const char* fmt, ...) {
+    if(!app->trace) return;
+    char* line = app->trace[app->trace_n % TRACE_LINES];
+    int n = snprintf(line, TRACE_LEN, "%6lu ", (unsigned long)(now_ms() - app->scan_t0));
+    if(n < 0 || n >= TRACE_LEN) n = 0;
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line + n, TRACE_LEN - n, fmt, args);
+    va_end(args);
+    app->trace_n++;
 }
 
 static void format_freq(char* out, size_t size, uint32_t f) {
@@ -357,6 +385,7 @@ static void settings_defaults(Settings* s) {
     s->all_presets = 1;
     s->feedback = 1;
     s->language = LANG_EN;
+    s->debug_log = 0;
 }
 
 static void settings_load(App* app) {
@@ -380,6 +409,8 @@ static void settings_load(App* app) {
         flipper_format_rewind(ff);
         if(flipper_format_read_uint32(ff, "Language", &v, 1) && v < LANG_COUNT)
             app->settings.language = v;
+        flipper_format_rewind(ff);
+        if(flipper_format_read_uint32(ff, "Debug_log", &v, 1)) app->settings.debug_log = v ? 1 : 0;
     }
     g_lang = app->settings.language;
     furi_string_free(header);
@@ -396,6 +427,7 @@ static void settings_save(App* app) {
         flipper_format_write_uint32(ff, "All_presets", &app->settings.all_presets, 1);
         flipper_format_write_uint32(ff, "Feedback", &app->settings.feedback, 1);
         flipper_format_write_uint32(ff, "Language", &app->settings.language, 1);
+        flipper_format_write_uint32(ff, "Debug_log", &app->settings.debug_log, 1);
     }
     flipper_format_free(ff);
 }
@@ -753,6 +785,7 @@ static bool frequency_sweep(App* app) {
     if(best < app->threshold || best_f == 0) return false;
 
     float confirm = measure(app, best_f, 5);
+    trace(app, "sweep %lu %d conf %d", (unsigned long)best_f, (int)best, (int)confirm);
     if(confirm < app->threshold - 3.0f) return false;
 
     update_model(app, true, confirm, L("Refining frequency", "Frekvencia pontositasa"), false);
@@ -780,6 +813,7 @@ static bool frequency_sweep(App* app) {
             fine_f = f;
         }
     }
+    trace(app, "fine %lu %d", (unsigned long)fine_f, (int)fine);
     if(fine < app->threshold - 6.0f) return false;
 
     furi_mutex_acquire(app->mutex, FuriWaitForever);
@@ -803,6 +837,21 @@ static void start_preset(App* app, uint8_t preset) {
     app->win.started = false;
     app->win.wait_since = now_ms();
     app->win.prompted = false;
+    /* A press counts from ACTIVE_BELOW_DB under the level the frequency search found, never stricter
+     * than the sensitivity setting and never more than ACTIVE_MIN_DB looser. The frequency search
+     * accepts a signal down to 6 dB under the setting with a narrow filter; the presets measure
+     * the same remote lower, so the plain setting missed weak remotes after the first press. */
+    float level = app->an.manual ? app->threshold : app->an.rssi_peak - ACTIVE_BELOW_DB;
+    if(level > app->threshold) level = app->threshold;
+    if(level < app->threshold - ACTIVE_MIN_DB) level = app->threshold - ACTIVE_MIN_DB;
+    app->active_threshold = level;
+    trace(
+        app,
+        "preset %s %lu act %d peak %d",
+        presets[preset].name,
+        (unsigned long)app->an.freq_nominal,
+        (int)level,
+        (int)app->an.rssi_peak);
     rx_start(app, preset, app->an.freq_nominal);
 }
 
@@ -825,6 +874,7 @@ static bool complete_preset(App* app) {
         an->raw_best_preset = an->current;
     }
     bool quick_done = !app->settings.all_presets && preset_confirmed(an, an->current);
+    trace(app, "done %s dec %u span %lu", presets[an->current].name, p->decodes, (unsigned long)p->span_ms);
     int8_t next = quick_done ? -1 : next_pending(an);
     furi_mutex_release(app->mutex);
 
@@ -839,8 +889,20 @@ static bool modulation_tick(App* app) {
     Window* w = &app->win;
     uint32_t now = now_ms();
     float rssi = subghz_devices_get_rssi(app->device);
-    bool active = rssi > app->threshold;
+    bool active = rssi > app->active_threshold;
     PresetResult* p = &an->pr[an->current];
+    if(now - app->last_trace >= TRACE_EVERY_MS) {
+        app->last_trace = now;
+        trace(
+            app,
+            "%s r %d s %u w %u a %u d %u",
+            presets[an->current].name,
+            (int)rssi,
+            w->started,
+            w->prompted,
+            p->attempts,
+            p->decodes);
+    }
     char status[40];
     snprintf(status, sizeof(status), L("Testing: %s", "Vizsgalat: %s"), presets[an->current].name);
 
@@ -853,6 +915,7 @@ static bool modulation_tick(App* app) {
             w->first = now;
             w->prompted = false;
             app->counting = true;
+            trace(app, "start %d", (int)rssi);
         }
         w->last = now;
         p->signal_seen = true;
@@ -865,10 +928,13 @@ static bool modulation_tick(App* app) {
         bool prompt = now - w->wait_since >= PROMPT_MS;
         if(prompt && !w->prompted) {
             w->prompted = true;
+            trace(app, "prompt");
             feedback(app, &sequence_single_vibro);
         }
-        if(!an->any_activity && !an->manual && now - w->wait_since >= REFIND_MS) {
-            /* The frequency was probably noise: search again */
+        if(!an->manual && now - w->wait_since >= REFIND_MS) {
+            /* Nothing for a while: the frequency was noise or is off. Search it again; the presets
+             * already tested and the decodes are kept. */
+            trace(app, "refind");
             rx_stop(app);
             an->freq_found = false;
             an->phase = PhaseFreq;
@@ -892,6 +958,7 @@ static bool modulation_tick(App* app) {
     } else if(now - w->last >= SILENCE_MS) {
         /* The remote stopped sending */
         p->attempts++;
+        trace(app, "silence span %lu try %u", (unsigned long)span, p->attempts);
         if(p->decodes > 0 || span >= MIN_SPAN_MS || p->attempts >= MAX_ATTEMPTS) {
             complete = true;
         } else {
@@ -1127,7 +1194,20 @@ static void scan_start(App* app, bool manual) {
         if(app->manual_preset > 0) only = app->manual_preset - 1;
     }
     app->threshold = (float)sensitivity_dbm[app->settings.sensitivity];
+    app->active_threshold = app->threshold;
     analysis_reset(app, manual, only, freq);
+    if(app->trace) free(app->trace);
+    app->trace = app->settings.debug_log ? malloc(TRACE_LINES * TRACE_LEN) : NULL;
+    app->trace_n = 0;
+    app->scan_t0 = now_ms();
+    app->last_trace = 0;
+    trace(
+        app,
+        "%s v%s thr %d freq %lu",
+        manual ? "manual" : "auto",
+        APP_VERSION,
+        (int)app->threshold,
+        (unsigned long)freq);
     with_view_model(
         app->scan_view,
         ScanModel * m,
@@ -1622,6 +1702,14 @@ static void set_feedback(VariableItem* item) {
     settings_save(app);
 }
 
+static void set_debug_log(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    uint8_t i = variable_item_get_current_value_index(item);
+    app->settings.debug_log = i;
+    variable_item_set_current_value_text(item, on_off[g_lang][i]);
+    settings_save(app);
+}
+
 static void set_language(VariableItem* item) {
     App* app = variable_item_get_context(item);
     uint8_t i = variable_item_get_current_value_index(item);
@@ -1657,6 +1745,10 @@ static void build_settings_list(App* app) {
         list, L("Feedback", "Visszajelzes"), COUNT_OF(on_off[0]), set_feedback, app);
     variable_item_set_current_value_index(item, app->settings.feedback);
     variable_item_set_current_value_text(item, on_off[g_lang][app->settings.feedback]);
+    item = variable_item_list_add(
+        list, L("Debug log", "Hibanaplo"), COUNT_OF(on_off[0]), set_debug_log, app);
+    variable_item_set_current_value_index(item, app->settings.debug_log);
+    variable_item_set_current_value_text(item, on_off[g_lang][app->settings.debug_log]);
     item = variable_item_list_add(list, L("Version", "Verzio"), 1, NULL, app);
     variable_item_set_current_value_text(item, APP_VERSION);
 }
@@ -1678,6 +1770,20 @@ static void set_manual_preset(VariableItem* item) {
 static void manual_enter(void* context, uint32_t index) {
     App* app = context;
     if(index == 2) view_dispatcher_send_custom_event(app->vd, EvManualStart);
+}
+
+/* Writes the debug log of the last scan, oldest line first (after the worker stopped) */
+static void trace_save(App* app) {
+    if(!app->trace) return;
+    FuriString* out = furi_string_alloc();
+    uint32_t first = app->trace_n > TRACE_LINES ? app->trace_n - TRACE_LINES : 0;
+    for(uint32_t i = first; i < app->trace_n; i++)
+        furi_string_cat_printf(out, "%s\n", app->trace[i % TRACE_LINES]);
+    storage_simply_mkdir(app->storage, DATA_DIR);
+    write_text_file(app, TRACE_PATH, out);
+    furi_string_free(out);
+    free(app->trace);
+    app->trace = NULL;
 }
 
 static void build_manual_list(App* app) {
@@ -1761,6 +1867,7 @@ static bool custom_event_callback(void* context, uint32_t event) {
         return true;
     case EvScanDone:
         furi_thread_join(app->thread);
+        trace_save(app);
         notification_message(app->notif, &sequence_display_backlight_enforce_auto);
         build_result(app);
         show_result(app);
@@ -1770,6 +1877,7 @@ static bool custom_event_callback(void* context, uint32_t event) {
         return true;
     case EvScanCancel:
         scan_stop(app, FLAG_STOP);
+        trace_save(app);
         switch_to(app, ViewMain);
         return true;
     case EvResultNew:
@@ -1938,6 +2046,7 @@ static void app_free(App* app) {
     }
     free(app->an.raw_cur);
     free(app->an.raw_best);
+    if(app->trace) free(app->trace);
 
     furi_mutex_free(app->mutex);
     furi_string_free(app->text);

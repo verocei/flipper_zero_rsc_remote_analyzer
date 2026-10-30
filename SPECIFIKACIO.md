@@ -129,3 +129,16 @@ próbák alapján.
 - A jelentésfájl (`.txt`) kulcsai és értékei a nyelvtől függetlenül angolok (`Confidence: high / good /
   low`), hogy a mentések egyforma szerkezetűek maradjanak; a `.sub` fájlok nyelvfüggetlenek.
 - Angol útmutató: `USAGE.md`. A repó publikus, MIT licenccel.
+
+## Megvalósítás – 0.3 (2026-10-30)
+
+- **Hiba (a megrendelő próbája):** rövid jelnél a „Nyomd meg ujra a taviranyito gombjat!” után az újabb
+  gombnyomásra sem lépett tovább. Ok (valószínű): a frekvenciakereső keskeny szűrővel a beállított küszöb
+  alatt 6 dB-ig elfogadta a jelet, a modulációs szakasz viszont csak a küszöb fölött vette gombnyomásnak –
+  a beállítások szélesebb szűrővel ugyanazt a távirányítót gyengébbnek mérik, így a gyengébb jel soha nem
+  számított újabb nyomásnak.
+- **Javítás:** a gombnyomás küszöbe a talált jelszint alatt 10 dB, a beállításnál nem szigorúbb, és
+  legfeljebb 10 dB-lel enyhébb nála. 5 másodperc csend után a frekvencia újrakeresése akkor is elindul, ha
+  már volt jel (eddig csak jel nélkül); a vizsgált beállítások és a dekódolások megmaradnak.
+- **Hibanapló** (Beállítások, alapból ki): a vizsgálat jelszintjei és lépései a `debug_log.txt` fájlba,
+  hogy a valódi távirányítóval mért adatokból lehessen hangolni.

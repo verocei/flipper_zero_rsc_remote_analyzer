@@ -38,8 +38,8 @@ Fel/le választ, OK indít, Back kilép.
 5. **Ha a távirányító közben abbahagyja az adást**, a képernyő alján megjelenik:
    **„Nyomd meg ujra a taviranyito gombjat!”** (és rezeg). Nyomd meg újra – a vizsgálat ott
    folytatódik, ahol abbamaradt, a korábbi eredmények megmaradnak.
-6. Ha a talált frekvencián 5 másodpercig semmi nem jön, a Flipper újra megkeresi a frekvenciát (a
-   korábbi találat zaj volt).
+6. Ha a talált frekvencián 5 másodpercig semmi nem jön, a Flipper újra megkeresi a frekvenciát
+   („Tartsd nyomva a gombot!”); a már vizsgált beállítások és a dekódolások megmaradnak.
 7. **OK** bármikor: kész, az eddigiekből mutatja az eredményt. **Back**: megszakítás.
 
 ## Eredmény
@@ -56,6 +56,11 @@ Gombok: **Új** (újabb vizsgálat ugyanígy), **Mentés**, **Több** (Részlete
 mind a négy beállítás eredménye –, Kompatibilitás).
 
 ## Fix kód és ugrókód
+
+**Honnan tudja?** Nem a jelből méri, hanem a felismert protokollból: a firmware minden dekódere
+tudja a saját protokolljáról, hogy fix vagy ugrókódos (a protokoll típusa: *Static* / *Dynamic*). Ezért
+egyetlen sikeres dekódolás elég hozzá. Ismeretlen protokollnál nincs mire támaszkodni, ilyenkor nem is
+állít semmit.
 
 - **Fix kódos** protokoll: minden gombnyomás ugyanazt küldi. A mentett `.sub` fájl a Sub-GHz
   alkalmazásban (*Saved*) megnyitható. Küldeni csak saját rendszeren, a helyi szabályok szerint
@@ -90,6 +95,11 @@ egyforma szerkezetű legyen.
 | Ablak/preset | meddig hallgat egy beállítással: Rövid 0,6 s, **Normál 1 s**, Hosszú 1,6 s |
 | Mind a 4 preset | **Igen**: mindig mind a négyet kipróbálja; Nem: az első biztos dekódolásnál megáll |
 | Visszajelzés | rezgés és LED (dekódolás, újabb gombnyomás kérése, eredmény) |
+| Hibanapló (Debug log) | **Ki**; Be: minden vizsgálat kiírja az `apps_data/rsc_remote_analyzer/debug_log.txt` fájlt (a jelszintek és a lépések az utolsó kb. 20 másodpercből) – hiba bejelentéséhez |
+
+Az újabb gombnyomás attól számít jelnek, hogy a frekvenciakeresésnél mért szint alatt legfeljebb 10 dB-lel
+van, de soha nem szigorúbb az Érzékenység beállításánál, és legfeljebb 10 dB-lel enyhébb nála (Normál:
+−75 és −85 dBm között).
 
 ## Korlátok
 

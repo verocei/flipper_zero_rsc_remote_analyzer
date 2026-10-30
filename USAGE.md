@@ -32,8 +32,8 @@ Up/down selects, OK starts, Back exits.
 5. **If the remote stops transmitting meanwhile**, the bottom of the screen shows **"Press the remote
    button again!"** (and vibrates). Press it again – the scan goes on where it stopped, earlier results
    are kept.
-6. If nothing comes on the found frequency for 5 seconds, the Flipper searches the frequency again (the
-   earlier hit was noise).
+6. If nothing comes on the found frequency for 5 seconds, the Flipper searches the frequency again
+   ("Hold the remote button!"); the presets already tested and the decodes are kept.
 7. **OK** at any time: done, shows the result from what was found so far. **Back**: cancel.
 
 ## Result
@@ -50,6 +50,10 @@ Buttons: **New** (another scan the same way), **Save**, **More** (Detailed data,
 of all four presets –, Compatibility).
 
 ## Fixed code and rolling code
+
+**How does it know?** Not by measuring the signal but from the recognised protocol: every decoder of the
+firmware knows whether its protocol is fixed or rolling code (protocol type *Static* / *Dynamic*), so one
+successful decode is enough. For an unknown protocol there is nothing to go by, and the app claims nothing.
 
 - **Fixed code** protocol: every press sends the same code. The saved `.sub` file opens in the Sub-GHz
   app (*Saved*). Transmit only on your own system and within the local rules.
@@ -83,6 +87,10 @@ both UI languages.
 | Window/preset | how long it listens with one preset: Short 0.6 s, **Normal 1 s**, Long 1.6 s |
 | All 4 presets | **Yes**: always tries all four; No: stops at the first sure decode |
 | Feedback | vibration and LED (decode, request for another press, result) |
+| Debug log | **Off**; On: every scan writes `apps_data/rsc_remote_analyzer/debug_log.txt` (signal levels and steps of the last ~20 s), to report a problem |
+
+A new press counts from 10 dB under the level the frequency search found, but never stricter than the
+Sensitivity setting and at most 10 dB looser (Normal: between −75 and −85 dBm).
 
 ## Limits
 
