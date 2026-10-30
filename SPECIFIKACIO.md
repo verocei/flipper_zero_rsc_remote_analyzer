@@ -157,3 +157,14 @@ próbák alapján.
   méréssel; ha a finom keresés közben véget ér a nyomás, a megerősített listás frekvencia marad. Ha az
   újrakeresés más frekvenciát talál, a beállítások vizsgálata elölről indul, a régi frekvencián kapott
   eredmény nem számít.
+
+## Megvalósítás – 0.5 (2026-10-30)
+
+- **A hibanapló az utolsó 5 vizsgálatot tartja meg** (a megrendelő kérése): `debug_logs/debug_log_1.txt` a
+  legújabb, a régebbiek egy számmal feljebb lépnek, az ötödiknél régebbi törlődik; minden napló elején a
+  vizsgálat ideje. A 0.3–0.4 egyetlen `debug_log.txt` fájlja az első mentéskor törlődik.
+- A 0.4 próbája a megrendelő távirányítójával: a 433,92 MHz elsőre megvolt, egy nyomva tartott gombnyomással
+  kb. 2,7 s alatt lefutott mind a négy beállítás (AM270 és AM650 2–2 dekódolás, FM-en jel, dekódolás nélkül).
+- Távirányító nélkül a gyűjtött csúcsok miatt a zaj (387 MHz) a küszöbig felért; a finom keresés kiszűrte.
+  Hogy a „megerősített frekvencia marad” szabály se engedje át, az csak egyértelmű jelnél (a beállítás
+  fölött legalább 6 dB) érvényes.

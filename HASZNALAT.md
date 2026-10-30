@@ -97,7 +97,7 @@ egyforma szerkezetű legyen.
 | Ablak/preset | meddig hallgat egy beállítással: Rövid 0,6 s, **Normál 1 s**, Hosszú 1,6 s |
 | Mind a 4 preset | **Igen**: mindig mind a négyet kipróbálja; Nem: az első biztos dekódolásnál megáll |
 | Visszajelzés | rezgés és LED (dekódolás, újabb gombnyomás kérése, eredmény) |
-| Hibanapló (Debug log) | **Ki**; Be: minden vizsgálat kiírja az `apps_data/rsc_remote_analyzer/debug_log.txt` fájlt (a jelszintek és a lépések az utolsó kb. 20 másodpercből) – hiba bejelentéséhez |
+| Hibanapló (Debug log) | **Ki**; Be: minden vizsgálat naplót ír az `apps_data/rsc_remote_analyzer/debug_logs/` mappába (a vizsgálat ideje, a jelszintek és a lépések az utolsó kb. 20 másodpercből); az utolsó 5 vizsgálaté marad meg, a `debug_log_1.txt` a legújabb – hiba bejelentéséhez |
 
 Az újabb gombnyomás attól számít jelnek, hogy a frekvenciakeresésnél mért szint alatt legfeljebb 10 dB-lel
 van, de soha nem szigorúbb az Érzékenység beállításánál, és legfeljebb 10 dB-lel enyhébb nála (Normál:

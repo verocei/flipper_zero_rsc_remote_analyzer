@@ -31,7 +31,8 @@ specification (Hungarian) is [SPECIFIKACIO.md](SPECIFIKACIO.md).
    frequency search found (clamped to the sensitivity setting and at most 10 dB below it); a 350 ms
    silence means the remote stopped. After 5 s without a press the frequency is searched again, keeping
    the presets already tested. With *Debug log* on, each scan writes
-   `apps_data/rsc_remote_analyzer/debug_log.txt`.
+   `apps_data/rsc_remote_analyzer/debug_logs/debug_log_1.txt`; the last 5 scans are kept (`_1` is the
+   newest).
 3. **Result** – the protocol with the most decodes wins; its most successful preset is the modulation.
    The protocol type (`Static` / `Dynamic`) gives fixed code / rolling code. Without a decode the result
    is "unknown protocol": the modulation is only a guess from the pulse statistics, and nothing is

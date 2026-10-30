@@ -45,12 +45,13 @@
 #define TAG "RscRemoteAnalyzer"
 
 #define APP_NAME    "RSC Remote Analyzer"
-#define APP_VERSION "0.4"
+#define APP_VERSION "0.5"
 
 #define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
 #define REPORT_DIR    DATA_DIR "/reports"
 #define SETTINGS_PATH DATA_DIR "/settings.txt"
-#define TRACE_PATH    DATA_DIR "/debug_log.txt"
+#define TRACE_DIR     DATA_DIR "/debug_logs"
+#define TRACE_OLD     DATA_DIR "/debug_log.txt" /* single log of 0.3-0.4 */
 #define SUB_DIR       EXT_PATH("subghz/rsc_remote_analyzer")
 
 #define SETTINGS_FILE_TYPE "RSC Remote Analyzer Settings"
@@ -73,10 +74,12 @@
 #define ACTIVE_BELOW_DB 10.0f /* a press counts from this far below the found level ... */
 #define ACTIVE_MIN_DB   10.0f /* ... but at most this far below the sensitivity setting */
 
-/* Debug log: the last TRACE_LINES lines of a scan, written to TRACE_PATH when it ends */
+/* Debug log: the last TRACE_LINES lines of a scan, written to TRACE_DIR when it ends; the last
+ * TRACE_KEEP scans are kept, debug_log_1.txt is the newest */
 #define TRACE_LINES    200
 #define TRACE_LEN      56
 #define TRACE_EVERY_MS 100
+#define TRACE_KEEP     5u
 
 /* Fine frequency search */
 #define FINE_SPAN_HZ   300000
@@ -87,6 +90,7 @@
 #define HARMONIC_PPM   5000 /* 2 x f within 0.5 % = second harmonic of f */
 #define HARMONIC_DB    10.0f /* the fundamental may be this far under the sensitivity setting */
 #define FINE_DROP_DB   12.0f /* the fine sweep this far under the confirmation = the press ended */
+#define FINE_KEEP_DB   6.0f /* ... and the confirmation counts as a clear signal this far over the setting */
 #define CC1101_MDMCFG4 0x10
 
 /* UI language: index into the [LANG_COUNT] string pairs below */
@@ -311,6 +315,7 @@ typedef struct {
     float active_threshold; /* what counts as a press in the modulation search */
     uint32_t last_model;
     uint32_t scan_t0;
+    DateTime scan_time;
     char (*trace)[TRACE_LEN];
     uint32_t trace_n;
     uint32_t last_trace;
@@ -858,8 +863,9 @@ static bool frequency_sweep(App* app) {
     }
     trace(app, "fine %lu %d", (unsigned long)fine_f, (int)fine);
     /* Much weaker than a moment ago: the press ended during the fine sweep, its peak is not the
-     * remote. The confirmed list frequency stands instead. */
-    if(fine < confirm - FINE_DROP_DB) {
+     * remote. The confirmed list frequency stands instead - but only for a clear signal: noise
+     * just over the threshold must not pass this way. */
+    if(fine < confirm - FINE_DROP_DB && confirm >= app->threshold + FINE_KEEP_DB) {
         trace(app, "fine dropped, keep %lu", (unsigned long)best_f);
         fine = confirm;
         fine_f = best_f;
@@ -1261,6 +1267,7 @@ static void scan_start(App* app, bool manual) {
     app->trace = app->settings.debug_log ? malloc(TRACE_LINES * TRACE_LEN) : NULL;
     app->trace_n = 0;
     app->scan_t0 = now_ms();
+    furi_hal_rtc_get_datetime(&app->scan_time);
     app->last_trace = 0;
     trace(
         app,
@@ -1833,15 +1840,39 @@ static void manual_enter(void* context, uint32_t index) {
     if(index == 2) view_dispatcher_send_custom_event(app->vd, EvManualStart);
 }
 
-/* Writes the debug log of the last scan, oldest line first (after the worker stopped) */
+/* Writes the debug log of the last scan, oldest line first (after the worker stopped). The older
+ * logs move one number up (debug_log_1 -> debug_log_2 ...), the one past TRACE_KEEP is deleted. */
 static void trace_save(App* app) {
     if(!app->trace) return;
     FuriString* out = furi_string_alloc();
+    DateTime* dt = &app->scan_time;
+    furi_string_printf(
+        out,
+        "Scan: %04u-%02u-%02u %02u:%02u:%02u\n",
+        dt->year,
+        dt->month,
+        dt->day,
+        dt->hour,
+        dt->minute,
+        dt->second);
     uint32_t first = app->trace_n > TRACE_LINES ? app->trace_n - TRACE_LINES : 0;
     for(uint32_t i = first; i < app->trace_n; i++)
         furi_string_cat_printf(out, "%s\n", app->trace[i % TRACE_LINES]);
+
     storage_simply_mkdir(app->storage, DATA_DIR);
-    write_text_file(app, TRACE_PATH, out);
+    storage_simply_mkdir(app->storage, TRACE_DIR);
+    storage_simply_remove(app->storage, TRACE_OLD);
+    char from[96];
+    char to[96];
+    snprintf(to, sizeof(to), "%s/debug_log_%u.txt", TRACE_DIR, TRACE_KEEP);
+    storage_simply_remove(app->storage, to);
+    for(unsigned n = TRACE_KEEP - 1; n >= 1; n--) {
+        snprintf(from, sizeof(from), "%s/debug_log_%u.txt", TRACE_DIR, n);
+        snprintf(to, sizeof(to), "%s/debug_log_%u.txt", TRACE_DIR, n + 1);
+        if(storage_common_exists(app->storage, from)) storage_common_rename(app->storage, from, to);
+    }
+    snprintf(to, sizeof(to), "%s/debug_log_1.txt", TRACE_DIR);
+    write_text_file(app, to, out);
     furi_string_free(out);
     free(app->trace);
     app->trace = NULL;

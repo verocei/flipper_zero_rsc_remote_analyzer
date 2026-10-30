@@ -89,7 +89,7 @@ both UI languages.
 | Window/preset | how long it listens with one preset: Short 0.6 s, **Normal 1 s**, Long 1.6 s |
 | All 4 presets | **Yes**: always tries all four; No: stops at the first sure decode |
 | Feedback | vibration and LED (decode, request for another press, result) |
-| Debug log | **Off**; On: every scan writes `apps_data/rsc_remote_analyzer/debug_log.txt` (signal levels and steps of the last ~20 s), to report a problem |
+| Debug log | **Off**; On: every scan writes a log to `apps_data/rsc_remote_analyzer/debug_logs/` (scan time, signal levels and steps of the last ~20 s); the last 5 scans are kept, `debug_log_1.txt` is the newest – to report a problem |
 
 A new press counts from 10 dB under the level the frequency search found, but never stricter than the
 Sensitivity setting and at most 10 dB looser (Normal: between −75 and −85 dBm).
