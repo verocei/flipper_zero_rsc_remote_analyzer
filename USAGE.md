@@ -23,7 +23,8 @@ Up/down selects, OK starts, Back exits.
 1. Start it, hold the remote close to the Flipper (10–50 cm) and **press and hold** its button.
 2. **Frequency search:** the Flipper sweeps the Sub-GHz frequency list (`subghz/assets/setting_user`),
    refines around the strongest signal with a narrow filter and snaps to the nearby standard frequency
-   (e.g. 433.92 MHz).
+   (e.g. 433.92 MHz). A remote held very close is also heard on its double frequency (433.92 → about
+   868 MHz); the app recognises this and takes the base frequency.
 3. **Modulation:** it tries **AM270, AM650, FM238, FM476** one after another, each with every decoder of
    the firmware. Of the four boxes on the screen the filled one is being tried; below them a **solid
    bar** = decoded signal, a **dotted line** = tested, no decode.
@@ -33,7 +34,8 @@ Up/down selects, OK starts, Back exits.
    button again!"** (and vibrates). Press it again – the scan goes on where it stopped, earlier results
    are kept.
 6. If nothing comes on the found frequency for 5 seconds, the Flipper searches the frequency again
-   ("Hold the remote button!"); the presets already tested and the decodes are kept.
+   ("Hold the remote button!"); the presets already tested and the decodes are kept. If it finds a
+   different frequency this time, the presets are tested again from the start on the new one.
 7. **OK** at any time: done, shows the result from what was found so far. **Back**: cancel.
 
 ## Result

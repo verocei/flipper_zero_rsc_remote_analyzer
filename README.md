@@ -15,9 +15,14 @@ specification (Hungarian) is [SPECIFIKACIO.md](SPECIFIKACIO.md).
 ## How it works
 
 1. **Frequency search** – coarse RSSI sweep over the Sub-GHz frequency list (`subghz/assets/setting_user`)
-   with the OOK 650 kHz preset; on a hit above the threshold a confirmation read, then a fine sweep
+   with the OOK 650 kHz preset, keeping a slowly fading peak per frequency across passes (a single read
+   can fall into a gap of an OOK signal). If the strongest frequency is in the upper band and half of it
+   was heard too, the half wins – a near 433.92 MHz remote is also heard on its 867.84 MHz harmonic.
+   On a hit above the threshold a confirmation read, then a fine sweep
    (±300 kHz in 20 kHz steps, then ±20 kHz in 5 kHz steps) with the same preset narrowed to a 58 kHz
-   channel filter. The result is snapped to the nearest list frequency within 75 kHz.
+   channel filter (if the press ended meanwhile, the confirmed list frequency stands). The result is
+   snapped to the nearest list frequency within 75 kHz. When a later search finds another frequency, the
+   presets are tested again from the start.
 2. **Modulation search** – for each preset: async RX on the found frequency, `SubGhzWorker` →
    `SubGhzReceiver` with all decodable protocols (KeeLoq keystore and rainbow tables loaded as in the
    Sub-GHz app; weather stations and TPMS ignored). A preset is finished after two decodes, after the

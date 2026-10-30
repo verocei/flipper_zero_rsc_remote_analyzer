@@ -29,7 +29,8 @@ Fel/le választ, OK indít, Back kilép.
    nyomva** a gombját.
 2. **Frekvencia keresése:** a Flipper végigpásztázza a Sub-GHz frekvencialistát (a
    `subghz/assets/setting_user` szerint), a legerősebb jel körül keskeny sávval pontosít, és a
-   közeli szabványos frekvenciára kerekít (pl. 433,92 MHz).
+   közeli szabványos frekvenciára kerekít (pl. 433,92 MHz). A nagyon közel tartott távirányító a dupla
+   frekvencián is hallatszik (433,92 → kb. 868 MHz); a program ezt felismeri, és az alapfrekvenciát veszi.
 3. **Moduláció:** sorban kipróbálja az **AM270, AM650, FM238, FM476** beállítást, mindegyikkel a
    firmware összes dekóderével. A képernyőn a négy négyzet közül a kitöltött az éppen próbált; alatta
    **teli csík** = dekódolt jelet, **pontozott vonal** = vizsgálva, de nem dekódolt.
@@ -39,7 +40,8 @@ Fel/le választ, OK indít, Back kilép.
    **„Nyomd meg ujra a taviranyito gombjat!”** (és rezeg). Nyomd meg újra – a vizsgálat ott
    folytatódik, ahol abbamaradt, a korábbi eredmények megmaradnak.
 6. Ha a talált frekvencián 5 másodpercig semmi nem jön, a Flipper újra megkeresi a frekvenciát
-   („Tartsd nyomva a gombot!”); a már vizsgált beállítások és a dekódolások megmaradnak.
+   („Tartsd nyomva a gombot!”); a már vizsgált beállítások és a dekódolások megmaradnak. Ha ezúttal más
+   frekvenciát talál, a beállításokat az új frekvencián elölről vizsgálja.
 7. **OK** bármikor: kész, az eddigiekből mutatja az eredményt. **Back**: megszakítás.
 
 ## Eredmény

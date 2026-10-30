@@ -45,7 +45,7 @@
 #define TAG "RscRemoteAnalyzer"
 
 #define APP_NAME    "RSC Remote Analyzer"
-#define APP_VERSION "0.3"
+#define APP_VERSION "0.4"
 
 #define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
 #define REPORT_DIR    DATA_DIR "/reports"
@@ -83,6 +83,10 @@
 #define FINE_STEP_HZ   20000
 #define FINE2_STEP_HZ  5000
 #define SNAP_HZ        75000
+#define SWEEP_DECAY_DB 1.0f /* the per-frequency peaks of the coarse sweep fade this much per pass */
+#define HARMONIC_PPM   5000 /* 2 x f within 0.5 % = second harmonic of f */
+#define HARMONIC_DB    10.0f /* the fundamental may be this far under the sensitivity setting */
+#define FINE_DROP_DB   12.0f /* the fine sweep this far under the confirmation = the press ended */
 #define CC1101_MDMCFG4 0x10
 
 /* UI language: index into the [LANG_COUNT] string pairs below */
@@ -303,6 +307,7 @@ typedef struct {
     Window win;
     volatile bool counting;
     float threshold;
+    float sweep_peak[FREQ_MAX]; /* coarse sweep: fading peak per frequency of the list */
     float active_threshold; /* what counts as a press in the modulation search */
     uint32_t last_model;
     uint32_t scan_t0;
@@ -767,24 +772,62 @@ static bool stop_requested(void) {
     return (furi_thread_flags_get() & (FLAG_STOP | FLAG_FINISH)) != 0;
 }
 
+static void sweep_forget(App* app) {
+    for(size_t i = 0; i < FREQ_MAX; i++) app->sweep_peak[i] = -200.0f;
+}
+
+/* A near remote is also heard on its second harmonic (433.92 MHz -> 867.84 MHz). When the strongest
+ * frequency is in the upper band and half of it was heard as well, the half is the remote. */
+static size_t fundamental_of(App* app, size_t best) {
+    uint32_t f = app->freqs[best];
+    if(f < 779000000) return best;
+    size_t found = best;
+    float found_level = -200.0f;
+    for(size_t i = 0; i < app->freq_count; i++) {
+        uint32_t twice = app->freqs[i] * 2;
+        uint32_t diff = twice > f ? twice - f : f - twice;
+        if(diff > f / 1000000 * HARMONIC_PPM) continue;
+        float level = app->sweep_peak[i];
+        if(level >= app->threshold - HARMONIC_DB && level > found_level) {
+            found = i;
+            found_level = level;
+        }
+    }
+    return found;
+}
+
 static bool frequency_sweep(App* app) {
     subghz_devices_idle(app->device);
     subghz_devices_load_preset(app->device, FuriHalSubGhzPresetOok650Async, NULL);
 
-    float best = -200.0f;
-    uint32_t best_f = 0;
+    /* One read per frequency can fall into a gap of an AM (OOK) signal, so the peaks of the passes
+     * are kept, fading slowly, and the best frequency is chosen from them. */
+    size_t best_i = 0;
     for(size_t i = 0; i < app->freq_count; i++) {
         if(stop_requested()) return false;
         float r = measure(app, app->freqs[i], 1);
-        if(r > best) {
-            best = r;
-            best_f = app->freqs[i];
-        }
+        float kept = app->sweep_peak[i] - SWEEP_DECAY_DB;
+        app->sweep_peak[i] = r > kept ? r : kept;
+        if(app->sweep_peak[i] > app->sweep_peak[best_i]) best_i = i;
     }
+    if(app->freq_count == 0) return false;
+    float best = app->sweep_peak[best_i];
     update_model(app, true, best, L("Hold the remote button!", "Tartsd nyomva a gombot!"), false);
-    if(best < app->threshold || best_f == 0) return false;
+    if(best < app->threshold) return false;
 
-    float confirm = measure(app, best_f, 5);
+    size_t fund_i = fundamental_of(app, best_i);
+    if(fund_i != best_i) {
+        trace(
+            app,
+            "harmonic %lu -> %lu %d",
+            (unsigned long)app->freqs[best_i],
+            (unsigned long)app->freqs[fund_i],
+            (int)app->sweep_peak[fund_i]);
+        best_i = fund_i;
+    }
+    uint32_t best_f = app->freqs[best_i];
+
+    float confirm = measure(app, best_f, 10);
     trace(app, "sweep %lu %d conf %d", (unsigned long)best_f, (int)best, (int)confirm);
     if(confirm < app->threshold - 3.0f) return false;
 
@@ -797,7 +840,7 @@ static bool frequency_sweep(App* app) {
     for(uint32_t f = best_f - FINE_SPAN_HZ; f <= best_f + FINE_SPAN_HZ; f += FINE_STEP_HZ) {
         if(stop_requested()) return false;
         if(!subghz_devices_is_frequency_valid(app->device, f)) continue;
-        float r = measure(app, f, 3);
+        float r = measure(app, f, 6);
         if(r > fine) {
             fine = r;
             fine_f = f;
@@ -807,18 +850,34 @@ static bool frequency_sweep(App* app) {
     for(uint32_t f = centre - FINE_STEP_HZ; f <= centre + FINE_STEP_HZ; f += FINE2_STEP_HZ) {
         if(stop_requested()) return false;
         if(!subghz_devices_is_frequency_valid(app->device, f)) continue;
-        float r = measure(app, f, 3);
+        float r = measure(app, f, 6);
         if(r > fine) {
             fine = r;
             fine_f = f;
         }
     }
     trace(app, "fine %lu %d", (unsigned long)fine_f, (int)fine);
+    /* Much weaker than a moment ago: the press ended during the fine sweep, its peak is not the
+     * remote. The confirmed list frequency stands instead. */
+    if(fine < confirm - FINE_DROP_DB) {
+        trace(app, "fine dropped, keep %lu", (unsigned long)best_f);
+        fine = confirm;
+        fine_f = best_f;
+    }
     if(fine < app->threshold - 6.0f) return false;
+
+    uint32_t nominal = snap_frequency(app, fine_f);
+    uint32_t before = app->an.freq_nominal;
+    if(before && (nominal > before ? nominal - before : before - nominal) > SNAP_HZ) {
+        /* The search again found another frequency: what was tested on the old one (perhaps a
+         * harmonic) does not count. Start the presets over. */
+        trace(app, "restart %lu -> %lu", (unsigned long)before, (unsigned long)nominal);
+        analysis_reset(app, false, app->an.only_preset, 0);
+    }
 
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     app->an.freq_measured = fine_f;
-    app->an.freq_nominal = snap_frequency(app, fine_f);
+    app->an.freq_nominal = nominal;
     app->an.rssi_peak = fine > confirm ? fine : confirm;
     app->an.freq_found = true;
     furi_mutex_release(app->mutex);
@@ -935,6 +994,7 @@ static bool modulation_tick(App* app) {
             /* Nothing for a while: the frequency was noise or is off. Search it again; the presets
              * already tested and the decodes are kept. */
             trace(app, "refind");
+            sweep_forget(app);
             rx_stop(app);
             an->freq_found = false;
             an->phase = PhaseFreq;
@@ -1195,6 +1255,7 @@ static void scan_start(App* app, bool manual) {
     }
     app->threshold = (float)sensitivity_dbm[app->settings.sensitivity];
     app->active_threshold = app->threshold;
+    sweep_forget(app);
     analysis_reset(app, manual, only, freq);
     if(app->trace) free(app->trace);
     app->trace = app->settings.debug_log ? malloc(TRACE_LINES * TRACE_LEN) : NULL;

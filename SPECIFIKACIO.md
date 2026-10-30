@@ -142,3 +142,18 @@ próbák alapján.
   már volt jel (eddig csak jel nélkül); a vizsgált beállítások és a dekódolások megmaradnak.
 - **Hibanapló** (Beállítások, alapból ki): a vizsgálat jelszintjei és lépései a `debug_log.txt` fájlba,
   hogy a valódi távirányítóval mért adatokból lehessen hangolni.
+
+## Megvalósítás – 0.4 (2026-10-30)
+
+- **A valódi ok (a megrendelő 0.3-as próbájának hibanaplójából):** a 433,92 MHz-es távirányítónak a
+  második felharmonikusát (868 MHz körül) találta meg a frekvenciakereső. Ott az AM-beállítások még
+  fogtak valamit, az FM-beállítások semmit, és a 0.2 – mert már volt jel – nem kereste újra a frekvenciát:
+  ezért állt meg. A 0.3 az 5 másodperces újrakereséssel továbblépett, és megtalálta a 433,92 MHz-et. A
+  0.3-ban feltételezett küszöbprobléma nem játszott szerepet (a jel −41 … −69 dBm volt); a javítás marad,
+  mert a gyengébb távirányítónál segít.
+- **Javítás:** a durva pásztázás frekvenciánként egyetlen mérése az AM (OOK) jel szünetébe eshet, ezért a
+  pásztázások csúcsai lassan halványulva összegződnek; ha a legerősebb frekvencia a felső sávban van, és a
+  fele is hallatszott, a fele a távirányító (felharmonikus); a megerősítés 10, a finom keresés lépésenként 6
+  méréssel; ha a finom keresés közben véget ér a nyomás, a megerősített listás frekvencia marad. Ha az
+  újrakeresés más frekvenciát talál, a beállítások vizsgálata elölről indul, a régi frekvencián kapott
+  eredmény nem számít.
