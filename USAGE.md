@@ -98,7 +98,9 @@ the preset's noise. **A successful decode always counts as a signal**, even when
 remote received weakly from further away does not ask for needless extra presses.
 
 With a fixed sensitivity a new press counts from 10 dB under the level the frequency search found, but
-never stricter than the setting and at most 10 dB looser (Normal: between −75 and −85 dBm).
+never stricter than the setting and at most 10 dB looser (Normal: between −75 and −85 dBm). A fixed
+setting never goes closer than 6 dB to the measured noise – High in a noisy place would otherwise take
+the noise for a remote.
 
 Sensitivity does not extend the range: what falls under the noise on the Flipper's small antenna is not
 received with any setting.

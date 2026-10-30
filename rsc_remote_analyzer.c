@@ -45,7 +45,7 @@
 #define TAG "RscRemoteAnalyzer"
 
 #define APP_NAME    "RSC Remote Analyzer"
-#define APP_VERSION "0.7"
+#define APP_VERSION "0.8"
 
 #define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
 #define REPORT_DIR    DATA_DIR "/reports"
@@ -102,6 +102,7 @@
 #define AUTO_PRESS_MARGIN_DB 10.0f /* a press = this far over the preset's noise */
 #define AUTO_NOISE_EMA       0.02f /* how fast a preset's noise estimate follows the quiet readings */
 #define AUTO_NOISE_SPAN_DB   10.0f /* a preset's noise estimate stays this close to its typical level */
+#define FIXED_NOISE_DB       6.0f /* a fixed sensitivity never goes closer than this to the measured noise */
 
 /* UI language: index into the [LANG_COUNT] string pairs below */
 #define LANG_EN    0
@@ -330,7 +331,8 @@ typedef struct {
     float sweep_peak[FREQ_MAX]; /* coarse sweep: fading peak per frequency of the list */
     float sweep_floor[FREQ_MAX]; /* coarse sweep: noise estimate per frequency (automatic) */
     bool auto_sens;
-    float preset_floor; /* noise estimate of the preset being tested (automatic) */
+    float preset_floor; /* noise estimate of the preset being tested */
+    float fixed_press; /* fixed sensitivity: the press threshold before the noise guard */
     float active_threshold; /* what counts as a press in the modulation search */
     uint32_t last_model;
     uint32_t scan_t0;
@@ -812,8 +814,13 @@ static void sweep_forget(App* app) {
 
 /* What counts as a signal on list frequency i: the setting, or in Auto its own noise + margin */
 static float sweep_threshold(App* app, size_t i) {
-    if(!app->auto_sens) return app->threshold;
-    float t = app->sweep_floor[i] + AUTO_SWEEP_MARGIN_DB;
+    float floor = app->sweep_floor[i];
+    if(!app->auto_sens) {
+        /* A fixed setting under the noise (High in a noisy place) would take the noise for a remote */
+        float guard = floor + FIXED_NOISE_DB;
+        return floor > -199.0f && guard > app->threshold ? guard : app->threshold;
+    }
+    float t = floor + AUTO_SWEEP_MARGIN_DB;
     return t < AUTO_MIN_DBM ? AUTO_MIN_DBM : t;
 }
 
@@ -998,13 +1005,16 @@ static void start_preset(App* app, uint8_t preset) {
      * the level the frequency search found, never stricter than the setting and at most
      * ACTIVE_MIN_DB looser (the presets measure the same remote lower than the narrow search). */
     float level;
+    app->preset_floor = presets[preset].noise;
     if(app->auto_sens) {
-        app->preset_floor = presets[preset].noise;
         level = app->preset_floor + AUTO_PRESS_MARGIN_DB;
     } else {
         level = app->an.manual ? app->threshold : app->an.found_level - ACTIVE_BELOW_DB;
         if(level > app->threshold) level = app->threshold;
         if(level < app->threshold - ACTIVE_MIN_DB) level = app->threshold - ACTIVE_MIN_DB;
+        app->fixed_press = level;
+        float guard = app->preset_floor + FIXED_NOISE_DB;
+        if(level < guard) level = guard;
     }
     app->active_threshold = level;
     trace(
@@ -1052,18 +1062,19 @@ static bool modulation_tick(App* app) {
     uint32_t now = now_ms();
     float rssi = subghz_devices_get_rssi(app->device);
     PresetResult* p = &an->pr[an->current];
+    /* Learn the preset's noise from the quiet readings, kept near its typical level so a long
+     * signal is never taken for noise. Auto measures a press against it; a fixed setting only keeps
+     * FIXED_NOISE_DB above it. */
+    float typical = presets[an->current].noise;
+    if(rssi < app->active_threshold) app->preset_floor += (rssi - app->preset_floor) * AUTO_NOISE_EMA;
+    if(app->preset_floor > typical + AUTO_NOISE_SPAN_DB) app->preset_floor = typical + AUTO_NOISE_SPAN_DB;
+    if(app->preset_floor < typical - AUTO_NOISE_SPAN_DB) app->preset_floor = typical - AUTO_NOISE_SPAN_DB;
     if(app->auto_sens) {
-        /* Learn the preset's noise from the quiet readings, kept near its typical level so a long
-         * signal is never taken for noise */
-        float typical = presets[an->current].noise;
-        if(rssi < app->active_threshold)
-            app->preset_floor += (rssi - app->preset_floor) * AUTO_NOISE_EMA;
-        if(app->preset_floor > typical + AUTO_NOISE_SPAN_DB)
-            app->preset_floor = typical + AUTO_NOISE_SPAN_DB;
-        if(app->preset_floor < typical - AUTO_NOISE_SPAN_DB)
-            app->preset_floor = typical - AUTO_NOISE_SPAN_DB;
         float level = app->preset_floor + AUTO_PRESS_MARGIN_DB;
         app->active_threshold = level < AUTO_MIN_DBM ? AUTO_MIN_DBM : level;
+    } else {
+        float guard = app->preset_floor + FIXED_NOISE_DB;
+        app->active_threshold = app->fixed_press > guard ? app->fixed_press : guard;
     }
 
     /* A decode is always a signal, even one too weak for the RSSI threshold */
@@ -1973,21 +1984,6 @@ static void manual_enter(void* context, uint32_t index) {
  * logs move one number up (debug_log_1 -> debug_log_2 ...), the one past TRACE_KEEP is deleted. */
 static void trace_save(App* app) {
     if(!app->trace) return;
-    FuriString* out = furi_string_alloc();
-    DateTime* dt = &app->scan_time;
-    furi_string_printf(
-        out,
-        "Scan: %04u-%02u-%02u %02u:%02u:%02u\n",
-        dt->year,
-        dt->month,
-        dt->day,
-        dt->hour,
-        dt->minute,
-        dt->second);
-    uint32_t first = app->trace_n > TRACE_LINES ? app->trace_n - TRACE_LINES : 0;
-    for(uint32_t i = first; i < app->trace_n; i++)
-        furi_string_cat_printf(out, "%s\n", app->trace[i % TRACE_LINES]);
-
     storage_simply_mkdir(app->storage, DATA_DIR);
     storage_simply_mkdir(app->storage, TRACE_DIR);
     storage_simply_remove(app->storage, TRACE_OLD);
@@ -2001,8 +1997,31 @@ static void trace_save(App* app) {
         if(storage_common_exists(app->storage, from)) storage_common_rename(app->storage, from, to);
     }
     snprintf(to, sizeof(to), "%s/debug_log_1.txt", TRACE_DIR);
-    write_text_file(app, to, out);
-    furi_string_free(out);
+    /* Line by line straight into the file: a full log built as one string first needed up to twice
+     * its size again and ran the Flipper out of memory (0.7, High sensitivity in noise). */
+    Stream* stream = file_stream_alloc(app->storage);
+    if(file_stream_open(stream, to, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        DateTime* dt = &app->scan_time;
+        char head[40];
+        snprintf(
+            head,
+            sizeof(head),
+            "Scan: %04u-%02u-%02u %02u:%02u:%02u\n",
+            dt->year,
+            dt->month,
+            dt->day,
+            dt->hour,
+            dt->minute,
+            dt->second);
+        stream_write_cstring(stream, head);
+        uint32_t first = app->trace_n > TRACE_LINES ? app->trace_n - TRACE_LINES : 0;
+        for(uint32_t i = first; i < app->trace_n; i++) {
+            stream_write_cstring(stream, app->trace[i % TRACE_LINES]);
+            stream_write_char(stream, '\n');
+        }
+    }
+    file_stream_close(stream);
+    stream_free(stream);
     free(app->trace);
     app->trace = NULL;
 }

@@ -108,7 +108,8 @@ gombnyomást.
 
 Rögzített érzékenységnél az újabb gombnyomás attól számít jelnek, hogy a frekvenciakeresésnél mért szint
 alatt legfeljebb 10 dB-lel van, de soha nem szigorúbb a beállításnál, és legfeljebb 10 dB-lel enyhébb nála
-(Normál: −75 és −85 dBm között).
+(Normál: −75 és −85 dBm között). A rögzített érzékenység sem kerülhet 6 dB-nél közelebb a mért zajhoz –
+zajos helyen a Magas különben a zajt venné távirányítónak.
 
 Az érzékenység a vételi távolságot nem növeli: ami a Flipper kis antennáján a zaj alá esik, azt egyik
 beállítás sem fogja.

@@ -210,6 +210,16 @@ A megrendelő öt próbájának hibanaplója (A és B csatorna, közel és kb. 5
   közben véget érő nyomásnál a második lépés nem hallott semmit, és az első eredménye maradt (helyesen); a
   gyenge, −85 dBm-es megerősítésű találatot háromszor elvetette, és a következő nyomással a jót találta.
 
+## Megvalósítás – 0.8 (2026-10-30)
+
+- **Hiba (a megrendelő próbája):** *High* érzékenységgel a távirányítót nem ismerte fel, majd a Flipper
+  „Out of memory” hibával újraindult. Ok: a rögzített −85 dBm a zaj alá esett (a zajcsúcsok −83 dBm
+  körül), ezért a program a zajt vette jelnek, és a hibanapló megtelt; a vizsgálat végén a napló egyetlen
+  szövegként állt össze a memóriában, ez a puffer mellé a méretének akár kétszeresét is kérte.
+- **Javítás:** a hibanapló soronként, közvetlenül a fájlba íródik. A rögzített érzékenység (Low / Normal /
+  High) sem kerülhet 6 dB-nél közelebb a mért zajhoz: a frekvenciakeresésnél a frekvencia saját zajához, a
+  vizsgálat közben a vételi beállítás tanult zajához képest.
+
 ## Következő kör (a megrendelő kérése, 2026-10-30)
 
 - **Német nyelv** a felületen (English / Magyar / Deutsch), de csak akkor, ha az olvasás már biztosan jól
