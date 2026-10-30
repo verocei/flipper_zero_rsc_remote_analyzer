@@ -205,3 +205,12 @@ A megrendelő öt próbájának hibanaplója (A és B csatorna, közel és kb. 5
   lépésnél 5 kör). Ha az első pontosítás semmit nem hallott, a frekvenciát nem találgatja: a következő
   nyomással újrakeres (a talált frekvencia a mentett `.sub` fájlba kerül). A szomszédfrekvencia-mérés és a
   „megerősített listás frekvencia marad” szabály kikerült.
+- **A 0.7 próbája** (öt vizsgálat, A és B csatorna, nyomva tartva és rövid nyomásokkal): mind az öt
+  433,92 MHz-et adott, Princeton protokollal, AM270-nel és AM650-nel is dekódolva. A pontosító keresés
+  közben véget érő nyomásnál a második lépés nem hallott semmit, és az első eredménye maradt (helyesen); a
+  gyenge, −85 dBm-es megerősítésű találatot háromszor elvetette, és a következő nyomással a jót találta.
+
+## Következő kör (a megrendelő kérése, 2026-10-30)
+
+- **Német nyelv** a felületen (English / Magyar / Deutsch), de csak akkor, ha az olvasás már biztosan jól
+  működik.
