@@ -80,8 +80,8 @@ A *Mentés* gomb után nevet adhatsz (alapból hónap, nap, óra, perc: pl. `RA_
 | Fájl | Mikor |
 | --- | --- |
 | `apps_data/rsc_remote_analyzer/reports/<név>.txt` – a jelentés (idő, frekvencia, moduláció, protokoll, a négy beállítás eredménye, a dekódolt adat) | mindig |
-| `subghz/rsc_remote_analyzer/<név>.sub` – Flipper SubGhz Key File | felismert fix kódos protokollnál |
-| `subghz/rsc_remote_analyzer/<név>.sub` – Flipper SubGhz RAW File (elemzéshez) | ismeretlen protokollnál, ha volt felvétel |
+| `subghz/<név>.sub` – Flipper SubGhz Key File | felismert fix kódos protokollnál |
+| `subghz/<név>.sub` – Flipper SubGhz RAW File (elemzéshez) | ismeretlen protokollnál, ha volt felvétel |
 
 A `.sub` fájlok a Flipper saját formátumában vannak, a Sub-GHz alkalmazás és a ProtoView is
 megnyitja őket. A jelentések a főképernyő *Mentett vizsgálatok* menüjében olvashatók. A jelentés

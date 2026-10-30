@@ -46,7 +46,7 @@ specification (Hungarian) is [SPECIFIKACIO.md](SPECIFIKACIO.md).
 ## Saving
 
 - `apps_data/rsc_remote_analyzer/reports/<name>.txt` – analysis report (always).
-- `subghz/rsc_remote_analyzer/<name>.sub` – a standard Flipper SubGhz Key File for a decoded
+- `subghz/<name>.sub` – a standard Flipper SubGhz Key File for a decoded
   **fixed-code** protocol, or a Flipper SubGhz RAW File of the best-looking capture for an unknown one.
   Rolling-code protocols get the report only.
 

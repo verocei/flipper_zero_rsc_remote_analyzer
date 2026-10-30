@@ -73,8 +73,8 @@ the SD card:
 | File | When |
 | --- | --- |
 | `apps_data/rsc_remote_analyzer/reports/<name>.txt` – the report (time, frequency, modulation, protocol, the result of the four presets, the decoded data) | always |
-| `subghz/rsc_remote_analyzer/<name>.sub` – Flipper SubGhz Key File | recognised fixed-code protocol |
-| `subghz/rsc_remote_analyzer/<name>.sub` – Flipper SubGhz RAW File (for analysis) | unknown protocol, if there was a capture |
+| `subghz/<name>.sub` – Flipper SubGhz Key File | recognised fixed-code protocol |
+| `subghz/<name>.sub` – Flipper SubGhz RAW File (for analysis) | unknown protocol, if there was a capture |
 
 The `.sub` files are in the Flipper's own format; the Sub-GHz app and ProtoView open them. The reports
 can be read in *Saved scans* on the main screen. The report file has the same English keys and values in

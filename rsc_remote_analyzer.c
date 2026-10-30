@@ -45,14 +45,14 @@
 #define TAG "RscRemoteAnalyzer"
 
 #define APP_NAME    "RSC Remote Analyzer"
-#define APP_VERSION "0.8"
+#define APP_VERSION "0.9"
 
 #define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
 #define REPORT_DIR    DATA_DIR "/reports"
 #define SETTINGS_PATH DATA_DIR "/settings.txt"
 #define TRACE_DIR     DATA_DIR "/debug_logs"
 #define TRACE_OLD     DATA_DIR "/debug_log.txt" /* single log of 0.3-0.4 */
-#define SUB_DIR       EXT_PATH("subghz/rsc_remote_analyzer")
+#define SUB_DIR       EXT_PATH("subghz") /* where the Sub-GHz app lists its own saves */
 
 #define SETTINGS_FILE_TYPE "RSC Remote Analyzer Settings"
 #define REPORT_FILE_TYPE   "RSC Remote Analyzer Report"
@@ -1759,6 +1759,9 @@ static void build_report(App* app, FuriString* r, const char* name, const char* 
         furi_string_cat_str(r, "# Decoded data:\n");
         FuriString* info = furi_string_alloc_set(an->cand[app->best].info);
         furi_string_replace_all(info, "\r", "");
+        while(furi_string_size(info) &&
+              furi_string_get_char(info, furi_string_size(info) - 1) == '\n')
+            furi_string_left(info, furi_string_size(info) - 1);
         furi_string_cat_str(r, "# ");
         for(size_t i = 0; i < furi_string_size(info); i++) {
             char ch = furi_string_get_char(info, i);
