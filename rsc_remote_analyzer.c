@@ -45,7 +45,7 @@
 #define TAG "RscRemoteAnalyzer"
 
 #define APP_NAME    "RSC Remote Analyzer"
-#define APP_VERSION "0.6"
+#define APP_VERSION "0.7"
 
 #define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
 #define REPORT_DIR    DATA_DIR "/reports"
@@ -88,9 +88,11 @@
 #define SNAP_HZ        75000
 #define SWEEP_DECAY_DB 1.0f /* the per-frequency peaks of the coarse sweep fade this much per pass */
 #define HARMONIC_PPM   1000 /* 2 x f within 0.1 % = second harmonic of f */
-#define NEIGHBOUR_HZ   1000000 /* list frequencies this close to the hit are measured too */
-#define FINE_DROP_DB   12.0f /* the fine sweep this far under the confirmation = the press ended */
-#define FINE_KEEP_DB   6.0f /* ... and the confirmation counts as a clear signal this far over the setting */
+#define FINE_STEPS_MAX 41 /* steps of one fine round (2 x FINE_SPAN_HZ / FINE_STEP_HZ + 1 fits) */
+#define FINE_ROUNDS    8 /* the fine search repeats its round at most this many times ... */
+#define FINE2_ROUNDS   5 /* ... the second, narrower one this many */
+#define FINE_HITS      3 /* ... and stops after this many rounds that heard the remote */
+#define FINE_HIT_DB    6.0f /* a round heard the remote: a step this far under the threshold or more */
 #define CC1101_MDMCFG4 0x10
 
 /* Automatic sensitivity: a signal is measured against the noise of its own frequency and preset */
@@ -837,22 +839,51 @@ static size_t fundamental_of(App* app, size_t best) {
     return found;
 }
 
-/* The wide filter of the coarse sweep also hears a strong remote on the list frequencies next to
- * it: measure them right away and keep the strongest. */
-static size_t strongest_near(App* app, size_t best, float* level) {
-    uint32_t f = app->freqs[best];
-    size_t found = best;
-    *level = -200.0f;
-    for(size_t i = 0; i < app->freq_count; i++) {
-        uint32_t g = app->freqs[i];
-        if((g > f ? g - f : f - g) > NEIGHBOUR_HZ) continue;
-        float r = measure(app, g, 8);
-        if(r > *level) {
-            *level = r;
-            found = i;
+/* One fine search around centre (narrow filter). Like the coarse sweep it runs in quick rounds and
+ * keeps the peak of every step: one read can fall into a gap of an OOK signal, and a short press may
+ * end halfway - the peaks heard while it lasted stay valid. Returns the number of rounds that heard
+ * the remote (0 = it was gone); out_f / out_level = the strongest step. */
+static uint8_t fine_rounds(
+    App* app,
+    uint32_t centre,
+    uint32_t span,
+    uint32_t step,
+    uint8_t rounds,
+    float thr,
+    uint32_t* out_f,
+    float* out_level) {
+    float peak[FINE_STEPS_MAX];
+    uint32_t steps = 2 * span / step + 1;
+    if(steps > FINE_STEPS_MAX) steps = FINE_STEPS_MAX;
+    for(uint32_t k = 0; k < steps; k++) peak[k] = -200.0f;
+    uint8_t hits = 0;
+    uint8_t done = 0;
+    while(done < rounds && hits < FINE_HITS) {
+        float round_best = -200.0f;
+        for(uint32_t k = 0; k < steps; k++) {
+            if(stop_requested()) return 0;
+            uint32_t f = centre - span + k * step;
+            if(!subghz_devices_is_frequency_valid(app->device, f)) continue;
+            float r = measure(app, f, 1);
+            if(r > peak[k]) peak[k] = r;
+            if(r > round_best) round_best = r;
         }
+        done++;
+        if(round_best >= thr - FINE_HIT_DB) hits++;
     }
-    return found;
+    uint32_t best_k = steps / 2;
+    for(uint32_t k = 0; k < steps; k++)
+        if(peak[k] > peak[best_k]) best_k = k;
+    *out_f = centre - span + best_k * step;
+    *out_level = peak[best_k];
+    trace(
+        app,
+        "fine %lu %d rounds %u hits %u",
+        (unsigned long)*out_f,
+        (int)*out_level,
+        done,
+        hits);
+    return hits;
 }
 
 static bool frequency_sweep(App* app) {
@@ -902,18 +933,9 @@ static bool frequency_sweep(App* app) {
             (unsigned long)app->freqs[fund_i]);
         best_i = fund_i;
     }
-    float confirm;
-    size_t near_i = strongest_near(app, best_i, &confirm);
-    if(near_i != best_i) {
-        trace(
-            app,
-            "near %lu -> %lu",
-            (unsigned long)app->freqs[best_i],
-            (unsigned long)app->freqs[near_i]);
-        best_i = near_i;
-    }
     uint32_t best_f = app->freqs[best_i];
     float thr = sweep_threshold(app, best_i);
+    float confirm = measure(app, best_f, 10);
 
     trace(app, "sweep %lu %d conf %d thr %d", (unsigned long)best_f, (int)best, (int)confirm, (int)thr);
     if(confirm < thr - 3.0f) return false;
@@ -922,37 +944,22 @@ static bool frequency_sweep(App* app) {
     subghz_devices_idle(app->device);
     subghz_devices_load_preset(app->device, FuriHalSubGhzPresetCustom, app->narrow_preset);
 
-    float fine = -200.0f;
-    uint32_t fine_f = best_f;
-    for(uint32_t f = best_f - FINE_SPAN_HZ; f <= best_f + FINE_SPAN_HZ; f += FINE_STEP_HZ) {
-        if(stop_requested()) return false;
-        if(!subghz_devices_is_frequency_valid(app->device, f)) continue;
-        float r = measure(app, f, 6);
-        if(r > fine) {
-            fine = r;
-            fine_f = f;
-        }
+    /* First +-FINE_SPAN_HZ in FINE_STEP_HZ steps; if the remote was not heard there, it is gone
+     * (the press ended) and the next press starts the search again - a guessed frequency would end
+     * up in the saved .sub file. Then +-FINE_STEP_HZ in FINE2_STEP_HZ steps around the result; if the
+     * press ended by then, the first result stands (the snap to the list makes up the rest). */
+    uint32_t fine_f;
+    float fine;
+    if(!fine_rounds(app, best_f, FINE_SPAN_HZ, FINE_STEP_HZ, FINE_ROUNDS, thr, &fine_f, &fine))
+        return false;
+    uint32_t fine2_f;
+    float fine2;
+    if(fine_rounds(app, fine_f, FINE_STEP_HZ, FINE2_STEP_HZ, FINE2_ROUNDS, thr, &fine2_f, &fine2) &&
+       fine2 >= fine - 3.0f) {
+        fine_f = fine2_f;
+        fine = fine2;
     }
-    uint32_t centre = fine_f;
-    for(uint32_t f = centre - FINE_STEP_HZ; f <= centre + FINE_STEP_HZ; f += FINE2_STEP_HZ) {
-        if(stop_requested()) return false;
-        if(!subghz_devices_is_frequency_valid(app->device, f)) continue;
-        float r = measure(app, f, 6);
-        if(r > fine) {
-            fine = r;
-            fine_f = f;
-        }
-    }
-    trace(app, "fine %lu %d", (unsigned long)fine_f, (int)fine);
-    /* Much weaker than a moment ago: the press ended during the fine sweep, its peak is not the
-     * remote. The confirmed list frequency stands instead - but only for a clear signal: noise
-     * just over the threshold must not pass this way. */
-    if(fine < confirm - FINE_DROP_DB && confirm >= thr + FINE_KEEP_DB) {
-        trace(app, "fine dropped, keep %lu", (unsigned long)best_f);
-        fine = confirm;
-        fine_f = best_f;
-    }
-    if(fine < thr - 6.0f) return false;
+    if(fine < thr - FINE_HIT_DB) return false;
 
     uint32_t nominal = snap_frequency(app, fine_f);
     uint32_t before = app->an.freq_nominal;

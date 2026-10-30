@@ -190,3 +190,18 @@ A megrendelő öt próbájának hibanaplója (A és B csatorna, közel és kb. 5
   és a legerősebbet tartja meg (a széles szűrő a szomszéd frekvencián is erős jelet mutat).
 - **A naplóban minden dekódolás** a protokoll nevével és a kód lenyomatával (a csatornák így
   megkülönböztethetők), a frekvenciakeresés másodpercenként egy sorral.
+
+## Megvalósítás – 0.7 (2026-10-30)
+
+- **A 0.6 próbája** (öt vizsgálat, A és B csatorna): mind az ötben Princeton protokoll (fix kód), AM270 és
+  AM650 is dekódolt; a csatornák kódja a naplóban szétválik (`…01` / `…02`); egy nyomva tartott gombnyomással
+  a frekvencia után 2,7 s alatt lefutott a négy beállítás, gyengébb jelnél (−70 dBm) sem kért feleslegesen
+  újabb nyomást. **Két vizsgálat azonban 434,075 MHz-et adott 433,92 helyett:** a rövid nyomás a
+  pontosító keresés közben ért véget (egyszer a jel végét mérte, egyszer a durva keresés listás
+  frekvenciája maradt). A 0.6 szomszédfrekvencia-mérése nem vált be: erős jelnél ±1 MHz-en belül minden
+  szomszéd erősnek mér, és véletlenszerűen választott.
+- **Javítás:** a pontosító keresés a durvához hasonlóan gyors körökben fut, lépésenként a legnagyobb
+  értéket megtartva, amíg három kör nem hallotta a távirányítót (legfeljebb 8, illetve a második, szűkebb
+  lépésnél 5 kör). Ha az első pontosítás semmit nem hallott, a frekvenciát nem találgatja: a következő
+  nyomással újrakeres (a talált frekvencia a mentett `.sub` fájlba kerül). A szomszédfrekvencia-mérés és a
+  „megerősített listás frekvencia marad” szabály kikerült.

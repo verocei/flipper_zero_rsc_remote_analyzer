@@ -18,13 +18,14 @@ specification (Hungarian) is [SPECIFIKACIO.md](SPECIFIKACIO.md).
    with the OOK 650 kHz preset, keeping a slowly fading peak per frequency across passes (a single read
    can fall into a gap of an OOK signal). If the strongest frequency is in the upper band and half of it
    carries a signal right now (measured directly), the half wins – a near 433.92 MHz remote is also
-   heard on its 867.84 MHz harmonic. The list frequencies within 1 MHz of the hit are measured too and
-   the strongest is kept. With *Auto* sensitivity (default) every list frequency counts a signal from
-   12 dB over its own noise estimate (the lowest reading, rising slowly).
-   On a hit above the threshold a confirmation read, then a fine sweep
-   (±300 kHz in 20 kHz steps, then ±20 kHz in 5 kHz steps) with the same preset narrowed to a 58 kHz
-   channel filter (if the press ended meanwhile, the confirmed list frequency stands). The result is
-   snapped to the nearest list frequency within 75 kHz. When a later search finds another frequency, the
+   heard on its 867.84 MHz harmonic. With *Auto* sensitivity (default) every list frequency counts a
+   signal from 12 dB over its own noise estimate (the lowest reading, rising slowly).
+   On a hit above the threshold a confirmation read, then a fine sweep (±300 kHz in 20 kHz steps, then
+   ±20 kHz in 5 kHz steps) with the same preset narrowed to a 58 kHz channel filter. Like the coarse
+   sweep it runs in quick rounds keeping the peak of every step, until three rounds heard the remote:
+   a short press that ends halfway still leaves the right peak. If the first fine sweep heard nothing,
+   the search starts again with the next press; if only the second one did not, the first result
+   stands. The result is snapped to the nearest list frequency within 75 kHz. When a later search finds another frequency, the
    presets are tested again from the start.
 2. **Modulation search** – for each preset: async RX on the found frequency, `SubGhzWorker` →
    `SubGhzReceiver` with all decodable protocols (KeeLoq keystore and rainbow tables loaded as in the
