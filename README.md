@@ -17,7 +17,10 @@ specification (Hungarian) is [SPECIFIKACIO.md](SPECIFIKACIO.md).
 1. **Frequency search** – coarse RSSI sweep over the Sub-GHz frequency list (`subghz/assets/setting_user`)
    with the OOK 650 kHz preset, keeping a slowly fading peak per frequency across passes (a single read
    can fall into a gap of an OOK signal). If the strongest frequency is in the upper band and half of it
-   was heard too, the half wins – a near 433.92 MHz remote is also heard on its 867.84 MHz harmonic.
+   carries a signal right now (measured directly), the half wins – a near 433.92 MHz remote is also
+   heard on its 867.84 MHz harmonic. The list frequencies within 1 MHz of the hit are measured too and
+   the strongest is kept. With *Auto* sensitivity (default) every list frequency counts a signal from
+   12 dB over its own noise estimate (the lowest reading, rising slowly).
    On a hit above the threshold a confirmation read, then a fine sweep
    (±300 kHz in 20 kHz steps, then ±20 kHz in 5 kHz steps) with the same preset narrowed to a 58 kHz
    channel filter (if the press ended meanwhile, the confirmed list frequency stands). The result is

@@ -93,15 +93,25 @@ egyforma szerkezetű legyen.
 | Beállítás | Jelentés |
 | --- | --- |
 | Language/Nyelv | **English** (alap) vagy Magyar |
-| Érzékenység | mitől számít jelnek: Alacsony −65 dBm, **Normál −75 dBm**, Magas −85 dBm (zajos helyen az Alacsony, gyenge távirányítónál a Magas) |
+| Érzékenység | mitől számít jelnek: **Auto** (lent), vagy rögzítve Alacsony −65 dBm, Normál −75 dBm, Magas −85 dBm (zajos helyen az Alacsony, gyenge távirányítónál a Magas) |
 | Ablak/preset | meddig hallgat egy beállítással: Rövid 0,6 s, **Normál 1 s**, Hosszú 1,6 s |
 | Mind a 4 preset | **Igen**: mindig mind a négyet kipróbálja; Nem: az első biztos dekódolásnál megáll |
 | Visszajelzés | rezgés és LED (dekódolás, újabb gombnyomás kérése, eredmény) |
 | Hibanapló (Debug log) | **Ki**; Be: minden vizsgálat naplót ír az `apps_data/rsc_remote_analyzer/debug_logs/` mappába (a vizsgálat ideje, a jelszintek és a lépések az utolsó kb. 20 másodpercből); az utolsó 5 vizsgálaté marad meg, a `debug_log_1.txt` a legújabb – hiba bejelentéséhez |
 
-Az újabb gombnyomás attól számít jelnek, hogy a frekvenciakeresésnél mért szint alatt legfeljebb 10 dB-lel
-van, de soha nem szigorúbb az Érzékenység beállításánál, és legfeljebb 10 dB-lel enyhébb nála (Normál:
-−75 és −85 dBm között).
+**Auto érzékenység (alap):** a program a jelet a saját frekvenciájának és vételi beállításának zajához
+méri, nem egy rögzített dBm-értékhez. A frekvenciakeresésnél minden frekvencia a saját zajszintje fölött
+12 dB-től számít jelnek (a zajosabb frekvencia így magasabb küszöböt kap), a vizsgálat közben pedig az
+újabb gombnyomás a beállítás zaja fölött 10 dB-től. A **sikeres dekódolás mindig jelnek számít**, akkor is,
+ha a jelerősség ennél gyengébb – így a messzebbről, gyengén vett távirányító sem kér feleslegesen újabb
+gombnyomást.
+
+Rögzített érzékenységnél az újabb gombnyomás attól számít jelnek, hogy a frekvenciakeresésnél mért szint
+alatt legfeljebb 10 dB-lel van, de soha nem szigorúbb a beállításnál, és legfeljebb 10 dB-lel enyhébb nála
+(Normál: −75 és −85 dBm között).
+
+Az érzékenység a vételi távolságot nem növeli: ami a Flipper kis antennáján a zaj alá esik, azt egyik
+beállítás sem fogja.
 
 ## Korlátok
 

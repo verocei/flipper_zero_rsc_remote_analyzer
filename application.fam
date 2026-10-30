@@ -8,7 +8,7 @@ App(
     requires=["gui", "storage", "dialogs", "notification"],
     fap_category="Sub-GHz",
     fap_author="Athos / RSC",
-    fap_version="0.5",
+    fap_version="0.6",
     fap_description="Automatic remote analyzer: finds frequency and modulation, identifies the protocol",
     fap_icon="icon_10px.png",  # 10x10 1-bit remote control icon
 )

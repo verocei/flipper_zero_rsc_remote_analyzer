@@ -85,14 +85,23 @@ both UI languages.
 | Setting | Meaning |
 | --- | --- |
 | Language/Nyelv | **English** or Magyar (Hungarian) |
-| Sensitivity | what counts as a signal: Low −65 dBm, **Normal −75 dBm**, High −85 dBm (Low in a noisy place, High for a weak remote) |
+| Sensitivity | what counts as a signal: **Auto** (below), or fixed Low −65 dBm, Normal −75 dBm, High −85 dBm (Low in a noisy place, High for a weak remote) |
 | Window/preset | how long it listens with one preset: Short 0.6 s, **Normal 1 s**, Long 1.6 s |
 | All 4 presets | **Yes**: always tries all four; No: stops at the first sure decode |
 | Feedback | vibration and LED (decode, request for another press, result) |
 | Debug log | **Off**; On: every scan writes a log to `apps_data/rsc_remote_analyzer/debug_logs/` (scan time, signal levels and steps of the last ~20 s); the last 5 scans are kept, `debug_log_1.txt` is the newest – to report a problem |
 
-A new press counts from 10 dB under the level the frequency search found, but never stricter than the
-Sensitivity setting and at most 10 dB looser (Normal: between −75 and −85 dBm).
+**Auto sensitivity (default):** a signal is measured against the noise of its own frequency and preset,
+not against a fixed dBm value. In the frequency search every frequency counts a signal from 12 dB over its
+own noise (a noisy frequency gets a higher threshold); during the scan a new press counts from 10 dB over
+the preset's noise. **A successful decode always counts as a signal**, even when the level is weaker, so a
+remote received weakly from further away does not ask for needless extra presses.
+
+With a fixed sensitivity a new press counts from 10 dB under the level the frequency search found, but
+never stricter than the setting and at most 10 dB looser (Normal: between −75 and −85 dBm).
+
+Sensitivity does not extend the range: what falls under the noise on the Flipper's small antenna is not
+received with any setting.
 
 ## Limits
 

@@ -45,7 +45,7 @@
 #define TAG "RscRemoteAnalyzer"
 
 #define APP_NAME    "RSC Remote Analyzer"
-#define APP_VERSION "0.5"
+#define APP_VERSION "0.6"
 
 #define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
 #define REPORT_DIR    DATA_DIR "/reports"
@@ -87,11 +87,19 @@
 #define FINE2_STEP_HZ  5000
 #define SNAP_HZ        75000
 #define SWEEP_DECAY_DB 1.0f /* the per-frequency peaks of the coarse sweep fade this much per pass */
-#define HARMONIC_PPM   5000 /* 2 x f within 0.5 % = second harmonic of f */
-#define HARMONIC_DB    10.0f /* the fundamental may be this far under the sensitivity setting */
+#define HARMONIC_PPM   1000 /* 2 x f within 0.1 % = second harmonic of f */
+#define NEIGHBOUR_HZ   1000000 /* list frequencies this close to the hit are measured too */
 #define FINE_DROP_DB   12.0f /* the fine sweep this far under the confirmation = the press ended */
 #define FINE_KEEP_DB   6.0f /* ... and the confirmation counts as a clear signal this far over the setting */
 #define CC1101_MDMCFG4 0x10
+
+/* Automatic sensitivity: a signal is measured against the noise of its own frequency and preset */
+#define AUTO_MIN_DBM         (-95.0f) /* never count anything weaker than this */
+#define AUTO_SWEEP_MARGIN_DB 12.0f /* a list frequency's peak this far over its noise = a signal */
+#define AUTO_FLOOR_RISE_DB   0.5f /* a frequency's noise estimate rises at most this much per pass */
+#define AUTO_PRESS_MARGIN_DB 10.0f /* a press = this far over the preset's noise */
+#define AUTO_NOISE_EMA       0.02f /* how fast a preset's noise estimate follows the quiet readings */
+#define AUTO_NOISE_SPAN_DB   10.0f /* a preset's noise estimate stays this close to its typical level */
 
 /* UI language: index into the [LANG_COUNT] string pairs below */
 #define LANG_EN    0
@@ -109,13 +117,14 @@ static uint32_t g_lang = LANG_EN;
 typedef struct {
     const char* name;
     FuriHalSubGhzPreset preset;
+    float noise; /* typical RSSI without a signal (measured on a Flipper, 433.92 MHz) */
 } PresetDef;
 
 static const PresetDef presets[PRESET_COUNT] = {
-    {"AM270", FuriHalSubGhzPresetOok270Async},
-    {"AM650", FuriHalSubGhzPresetOok650Async},
-    {"FM238", FuriHalSubGhzPreset2FSKDev238Async},
-    {"FM476", FuriHalSubGhzPreset2FSKDev476Async},
+    {"AM270", FuriHalSubGhzPresetOok270Async, -96.0f},
+    {"AM650", FuriHalSubGhzPresetOok650Async, -88.0f},
+    {"FM238", FuriHalSubGhzPreset2FSKDev238Async, -100.0f},
+    {"FM476", FuriHalSubGhzPreset2FSKDev476Async, -100.0f},
 };
 
 /* Tie-break between presets with equal results: the most common ones first */
@@ -124,10 +133,12 @@ static const uint8_t preset_rank[PRESET_COUNT] = {2, 4, 3, 1};
 /* ------------------------------------------------------------------------- */
 /* Settings                                                                   */
 
-static const int8_t sensitivity_dbm[] = {-65, -75, -85};
-static const char* const sensitivity_names[LANG_COUNT][3] = {
-    {"Low", "Normal", "High"},
-    {"Alacsony", "Normal", "Magas"},
+/* Index 0 is automatic (SENSITIVITY_AUTO): the threshold follows the measured noise */
+#define SENSITIVITY_AUTO 0
+static const int8_t sensitivity_dbm[] = {0, -65, -75, -85};
+static const char* const sensitivity_names[LANG_COUNT][4] = {
+    {"Auto", "Low", "Normal", "High"},
+    {"Auto", "Alacsony", "Normal", "Magas"},
 };
 static const uint16_t window_ms[] = {600, 1000, 1600};
 static const char* const window_names[LANG_COUNT][3] = {
@@ -140,7 +151,7 @@ static const char* const language_names[LANG_COUNT] = {"English", "Magyar"};
 static const char* const manual_preset_names[] = {"Auto", "AM270", "AM650", "FM238", "FM476"};
 
 typedef struct {
-    uint32_t sensitivity; /* index into sensitivity_dbm */
+    uint32_t sensitivity; /* index into sensitivity_dbm, SENSITIVITY_AUTO = automatic */
     uint32_t window; /* index into window_ms */
     uint32_t all_presets; /* 1 = always try all four presets */
     uint32_t feedback; /* 1 = vibro/LED feedback */
@@ -191,6 +202,8 @@ typedef struct {
     uint32_t freq_nominal;
     uint32_t freq_measured;
     float rssi_peak;
+    float found_level; /* the level the frequency search found the remote at */
+    int8_t last_cand; /* candidate of the latest decode, -1 = none */
     bool any_activity; /* signal seen during the modulation search */
     uint8_t current;
     PresetResult pr[PRESET_COUNT];
@@ -209,6 +222,7 @@ typedef struct {
     uint32_t last;
     uint32_t wait_since;
     bool prompted;
+    uint16_t decodes_seen; /* decodes of the preset already counted as activity */
 } Window;
 
 /* ------------------------------------------------------------------------- */
@@ -312,6 +326,9 @@ typedef struct {
     volatile bool counting;
     float threshold;
     float sweep_peak[FREQ_MAX]; /* coarse sweep: fading peak per frequency of the list */
+    float sweep_floor[FREQ_MAX]; /* coarse sweep: noise estimate per frequency (automatic) */
+    bool auto_sens;
+    float preset_floor; /* noise estimate of the preset being tested (automatic) */
     float active_threshold; /* what counts as a press in the modulation search */
     uint32_t last_model;
     uint32_t scan_t0;
@@ -390,7 +407,7 @@ static const char* type_key(SubGhzProtocolType type) {
 /* Settings file                                                              */
 
 static void settings_defaults(Settings* s) {
-    s->sensitivity = 1;
+    s->sensitivity = SENSITIVITY_AUTO;
     s->window = 1;
     s->all_presets = 1;
     s->feedback = 1;
@@ -407,8 +424,12 @@ static void settings_load(App* app) {
        flipper_format_read_header(ff, header, &version) &&
        furi_string_equal(header, SETTINGS_FILE_TYPE)) {
         uint32_t v;
-        if(flipper_format_read_uint32(ff, "Sensitivity", &v, 1) && v < COUNT_OF(sensitivity_dbm))
-            app->settings.sensitivity = v;
+        if(flipper_format_read_uint32(ff, "Sensitivity", &v, 1)) {
+            /* Version 1 had Low / Normal / High at 0..2 with Normal as the default; the default
+             * becomes Auto, the other two keep their meaning */
+            if(version < 2) v = v == 1 ? SENSITIVITY_AUTO : v + 1;
+            if(v < COUNT_OF(sensitivity_dbm)) app->settings.sensitivity = v;
+        }
         flipper_format_rewind(ff);
         if(flipper_format_read_uint32(ff, "Window", &v, 1) && v < COUNT_OF(window_ms))
             app->settings.window = v;
@@ -431,7 +452,7 @@ static void settings_save(App* app) {
     storage_simply_mkdir(app->storage, DATA_DIR);
     FlipperFormat* ff = flipper_format_file_alloc(app->storage);
     if(flipper_format_file_open_always(ff, SETTINGS_PATH)) {
-        flipper_format_write_header_cstr(ff, SETTINGS_FILE_TYPE, 1);
+        flipper_format_write_header_cstr(ff, SETTINGS_FILE_TYPE, 2);
         flipper_format_write_uint32(ff, "Sensitivity", &app->settings.sensitivity, 1);
         flipper_format_write_uint32(ff, "Window", &app->settings.window, 1);
         flipper_format_write_uint32(ff, "All_presets", &app->settings.all_presets, 1);
@@ -607,6 +628,7 @@ static void receiver_callback(
         c->type = protocol->type;
         c->per_preset[an->current]++;
         c->last_preset = an->current;
+        an->last_cand = (int8_t)(c - an->cand);
         furi_string_reset(c->info);
         subghz_protocol_decoder_base_get_string(decoder_base, c->info);
 
@@ -653,6 +675,8 @@ static void analysis_reset(App* app, bool manual, uint8_t only_preset, uint32_t 
     an->freq_nominal = freq;
     an->freq_measured = freq;
     an->rssi_peak = -200.0f;
+    an->found_level = -200.0f;
+    an->last_cand = -1;
     an->any_activity = false;
     an->current = 0;
     an->raw_cur_n = 0;
@@ -778,11 +802,22 @@ static bool stop_requested(void) {
 }
 
 static void sweep_forget(App* app) {
-    for(size_t i = 0; i < FREQ_MAX; i++) app->sweep_peak[i] = -200.0f;
+    for(size_t i = 0; i < FREQ_MAX; i++) {
+        app->sweep_peak[i] = -200.0f;
+        app->sweep_floor[i] = -200.0f;
+    }
+}
+
+/* What counts as a signal on list frequency i: the setting, or in Auto its own noise + margin */
+static float sweep_threshold(App* app, size_t i) {
+    if(!app->auto_sens) return app->threshold;
+    float t = app->sweep_floor[i] + AUTO_SWEEP_MARGIN_DB;
+    return t < AUTO_MIN_DBM ? AUTO_MIN_DBM : t;
 }
 
 /* A near remote is also heard on its second harmonic (433.92 MHz -> 867.84 MHz). When the strongest
- * frequency is in the upper band and half of it was heard as well, the half is the remote. */
+ * frequency is in the upper band, the list frequencies at its half are measured right away (the
+ * remote is sending now); if one of them carries a signal, that is the remote. */
 static size_t fundamental_of(App* app, size_t best) {
     uint32_t f = app->freqs[best];
     if(f < 779000000) return best;
@@ -792,10 +827,29 @@ static size_t fundamental_of(App* app, size_t best) {
         uint32_t twice = app->freqs[i] * 2;
         uint32_t diff = twice > f ? twice - f : f - twice;
         if(diff > f / 1000000 * HARMONIC_PPM) continue;
-        float level = app->sweep_peak[i];
-        if(level >= app->threshold - HARMONIC_DB && level > found_level) {
+        float level = measure(app, app->freqs[i], 8);
+        trace(app, "half %lu %d", (unsigned long)app->freqs[i], (int)level);
+        if(level >= sweep_threshold(app, i) - 3.0f && level > found_level) {
             found = i;
             found_level = level;
+        }
+    }
+    return found;
+}
+
+/* The wide filter of the coarse sweep also hears a strong remote on the list frequencies next to
+ * it: measure them right away and keep the strongest. */
+static size_t strongest_near(App* app, size_t best, float* level) {
+    uint32_t f = app->freqs[best];
+    size_t found = best;
+    *level = -200.0f;
+    for(size_t i = 0; i < app->freq_count; i++) {
+        uint32_t g = app->freqs[i];
+        if((g > f ? g - f : f - g) > NEIGHBOUR_HZ) continue;
+        float r = measure(app, g, 8);
+        if(r > *level) {
+            *level = r;
+            found = i;
         }
     }
     return found;
@@ -807,34 +861,62 @@ static bool frequency_sweep(App* app) {
 
     /* One read per frequency can fall into a gap of an AM (OOK) signal, so the peaks of the passes
      * are kept, fading slowly, and the best frequency is chosen from them. */
+    /* In Auto, each frequency also keeps its noise: the lowest reading, rising slowly, so a noisy
+     * frequency needs a stronger peak. The best frequency is the one most over its threshold. */
     size_t best_i = 0;
+    float best_excess = -1000.0f;
     for(size_t i = 0; i < app->freq_count; i++) {
         if(stop_requested()) return false;
         float r = measure(app, app->freqs[i], 1);
         float kept = app->sweep_peak[i] - SWEEP_DECAY_DB;
         app->sweep_peak[i] = r > kept ? r : kept;
-        if(app->sweep_peak[i] > app->sweep_peak[best_i]) best_i = i;
+        float rise = app->sweep_floor[i] + AUTO_FLOOR_RISE_DB;
+        app->sweep_floor[i] = app->sweep_floor[i] < -199.0f || r < rise ? r : rise;
+        float excess = app->sweep_peak[i] - sweep_threshold(app, i);
+        if(excess > best_excess) {
+            best_excess = excess;
+            best_i = i;
+        }
     }
     if(app->freq_count == 0) return false;
     float best = app->sweep_peak[best_i];
     update_model(app, true, best, L("Hold the remote button!", "Tartsd nyomva a gombot!"), false);
-    if(best < app->threshold) return false;
+    uint32_t now = now_ms();
+    if(now - app->last_trace >= 1000) {
+        app->last_trace = now;
+        trace(
+            app,
+            "pass %lu pk %d thr %d",
+            (unsigned long)app->freqs[best_i],
+            (int)best,
+            (int)sweep_threshold(app, best_i));
+    }
+    if(best_excess < 0.0f) return false;
 
     size_t fund_i = fundamental_of(app, best_i);
     if(fund_i != best_i) {
         trace(
             app,
-            "harmonic %lu -> %lu %d",
+            "harmonic %lu -> %lu",
             (unsigned long)app->freqs[best_i],
-            (unsigned long)app->freqs[fund_i],
-            (int)app->sweep_peak[fund_i]);
+            (unsigned long)app->freqs[fund_i]);
         best_i = fund_i;
     }
+    float confirm;
+    size_t near_i = strongest_near(app, best_i, &confirm);
+    if(near_i != best_i) {
+        trace(
+            app,
+            "near %lu -> %lu",
+            (unsigned long)app->freqs[best_i],
+            (unsigned long)app->freqs[near_i]);
+        best_i = near_i;
+    }
     uint32_t best_f = app->freqs[best_i];
+    float thr = sweep_threshold(app, best_i);
 
-    float confirm = measure(app, best_f, 10);
-    trace(app, "sweep %lu %d conf %d", (unsigned long)best_f, (int)best, (int)confirm);
-    if(confirm < app->threshold - 3.0f) return false;
+    trace(app, "sweep %lu %d conf %d thr %d", (unsigned long)best_f, (int)best, (int)confirm, (int)thr);
+    if(confirm < thr - 3.0f) return false;
 
     update_model(app, true, confirm, L("Refining frequency", "Frekvencia pontositasa"), false);
     subghz_devices_idle(app->device);
@@ -865,12 +947,12 @@ static bool frequency_sweep(App* app) {
     /* Much weaker than a moment ago: the press ended during the fine sweep, its peak is not the
      * remote. The confirmed list frequency stands instead - but only for a clear signal: noise
      * just over the threshold must not pass this way. */
-    if(fine < confirm - FINE_DROP_DB && confirm >= app->threshold + FINE_KEEP_DB) {
+    if(fine < confirm - FINE_DROP_DB && confirm >= thr + FINE_KEEP_DB) {
         trace(app, "fine dropped, keep %lu", (unsigned long)best_f);
         fine = confirm;
         fine_f = best_f;
     }
-    if(fine < app->threshold - 6.0f) return false;
+    if(fine < thr - 6.0f) return false;
 
     uint32_t nominal = snap_frequency(app, fine_f);
     uint32_t before = app->an.freq_nominal;
@@ -884,7 +966,8 @@ static bool frequency_sweep(App* app) {
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     app->an.freq_measured = fine_f;
     app->an.freq_nominal = nominal;
-    app->an.rssi_peak = fine > confirm ? fine : confirm;
+    app->an.found_level = fine > confirm ? fine : confirm;
+    if(app->an.found_level > app->an.rssi_peak) app->an.rssi_peak = app->an.found_level;
     app->an.freq_found = true;
     furi_mutex_release(app->mutex);
     return true;
@@ -902,21 +985,28 @@ static void start_preset(App* app, uint8_t preset) {
     app->win.started = false;
     app->win.wait_since = now_ms();
     app->win.prompted = false;
-    /* A press counts from ACTIVE_BELOW_DB under the level the frequency search found, never stricter
-     * than the sensitivity setting and never more than ACTIVE_MIN_DB looser. The frequency search
-     * accepts a signal down to 6 dB under the setting with a narrow filter; the presets measure
-     * the same remote lower, so the plain setting missed weak remotes after the first press. */
-    float level = app->an.manual ? app->threshold : app->an.rssi_peak - ACTIVE_BELOW_DB;
-    if(level > app->threshold) level = app->threshold;
-    if(level < app->threshold - ACTIVE_MIN_DB) level = app->threshold - ACTIVE_MIN_DB;
+    app->win.decodes_seen = app->an.pr[preset].decodes;
+    /* Auto: a press is AUTO_PRESS_MARGIN_DB over the preset's noise, which modulation_tick keeps
+     * learning from the quiet readings. Fixed setting: a press counts from ACTIVE_BELOW_DB under
+     * the level the frequency search found, never stricter than the setting and at most
+     * ACTIVE_MIN_DB looser (the presets measure the same remote lower than the narrow search). */
+    float level;
+    if(app->auto_sens) {
+        app->preset_floor = presets[preset].noise;
+        level = app->preset_floor + AUTO_PRESS_MARGIN_DB;
+    } else {
+        level = app->an.manual ? app->threshold : app->an.found_level - ACTIVE_BELOW_DB;
+        if(level > app->threshold) level = app->threshold;
+        if(level < app->threshold - ACTIVE_MIN_DB) level = app->threshold - ACTIVE_MIN_DB;
+    }
     app->active_threshold = level;
     trace(
         app,
-        "preset %s %lu act %d peak %d",
+        "preset %s %lu act %d found %d",
         presets[preset].name,
         (unsigned long)app->an.freq_nominal,
         (int)level,
-        (int)app->an.rssi_peak);
+        (int)app->an.found_level);
     rx_start(app, preset, app->an.freq_nominal);
 }
 
@@ -954,15 +1044,46 @@ static bool modulation_tick(App* app) {
     Window* w = &app->win;
     uint32_t now = now_ms();
     float rssi = subghz_devices_get_rssi(app->device);
-    bool active = rssi > app->active_threshold;
     PresetResult* p = &an->pr[an->current];
+    if(app->auto_sens) {
+        /* Learn the preset's noise from the quiet readings, kept near its typical level so a long
+         * signal is never taken for noise */
+        float typical = presets[an->current].noise;
+        if(rssi < app->active_threshold)
+            app->preset_floor += (rssi - app->preset_floor) * AUTO_NOISE_EMA;
+        if(app->preset_floor > typical + AUTO_NOISE_SPAN_DB)
+            app->preset_floor = typical + AUTO_NOISE_SPAN_DB;
+        if(app->preset_floor < typical - AUTO_NOISE_SPAN_DB)
+            app->preset_floor = typical - AUTO_NOISE_SPAN_DB;
+        float level = app->preset_floor + AUTO_PRESS_MARGIN_DB;
+        app->active_threshold = level < AUTO_MIN_DBM ? AUTO_MIN_DBM : level;
+    }
+
+    /* A decode is always a signal, even one too weak for the RSSI threshold */
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    uint16_t decodes = p->decodes;
+    char dec_name[NAME_LEN] = "";
+    uint32_t dec_hash = 0;
+    if(an->last_cand >= 0) {
+        strlcpy(dec_name, an->cand[an->last_cand].name, NAME_LEN);
+        dec_hash = an->cand[an->last_cand].last_hash;
+    }
+    furi_mutex_release(app->mutex);
+    bool decoded = decodes != w->decodes_seen;
+    if(decoded) {
+        w->decodes_seen = decodes;
+        trace(app, "dec %s %08lX r %d", dec_name, (unsigned long)dec_hash, (int)rssi);
+    }
+    bool active = decoded || rssi > app->active_threshold;
+
     if(now - app->last_trace >= TRACE_EVERY_MS) {
         app->last_trace = now;
         trace(
             app,
-            "%s r %d s %u w %u a %u d %u",
+            "%s r %d t %d s %u w %u a %u d %u",
             presets[an->current].name,
             (int)rssi,
+            (int)app->active_threshold,
             w->started,
             w->prompted,
             p->attempts,
@@ -1259,7 +1380,8 @@ static void scan_start(App* app, bool manual) {
         freq = app->freqs[app->manual_freq];
         if(app->manual_preset > 0) only = app->manual_preset - 1;
     }
-    app->threshold = (float)sensitivity_dbm[app->settings.sensitivity];
+    app->auto_sens = app->settings.sensitivity == SENSITIVITY_AUTO;
+    app->threshold = app->auto_sens ? AUTO_MIN_DBM : (float)sensitivity_dbm[app->settings.sensitivity];
     app->active_threshold = app->threshold;
     sweep_forget(app);
     analysis_reset(app, manual, only, freq);
@@ -1271,10 +1393,10 @@ static void scan_start(App* app, bool manual) {
     app->last_trace = 0;
     trace(
         app,
-        "%s v%s thr %d freq %lu",
+        "%s v%s sens %s freq %lu",
         manual ? "manual" : "auto",
         APP_VERSION,
-        (int)app->threshold,
+        sensitivity_names[LANG_EN][app->settings.sensitivity],
         (unsigned long)freq);
     with_view_model(
         app->scan_view,
