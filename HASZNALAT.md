@@ -6,9 +6,9 @@ frekvenciát, végigpróbálja a négy vételi beállítást, és megpróbálja 
 
 Az alkalmazás **csak vesz, soha nem ad**. Helye a Flipperen: *Apps › Sub-GHz › RSC Remote Analyzer*.
 
-**A felület telepítés után angol.** Magyarra a *Settings › Language/Nyelv* sorban lehet váltani (a sor
-neve mindkét nyelven ugyanez, hogy bármelyik nyelvről megtalálható legyen). Az útmutató a magyar
-feliratokat idézi; az angol változat a [USAGE.md](USAGE.md).
+**A felület telepítés után angol.** Magyarra vagy németre a *Settings › Language* sorban lehet váltani
+(a sor neve minden nyelven ugyanez, hogy bármelyik nyelvről megtalálható legyen). Az útmutató a magyar
+feliratokat idézi; az angol változat a [USAGE.md](USAGE.md), a német az [ANLEITUNG.md](ANLEITUNG.md).
 
 > A Flipper beépített betűkészlete nem tud ékezetes betűt, ezért a képernyőn ékezet nélkül áll minden
 > magyar szöveg („Automatikus vizsgalat”).
@@ -35,7 +35,7 @@ Fel/le választ, OK indít, Back kilép.
    firmware összes dekóderével. A képernyőn a négy négyzet közül a kitöltött az éppen próbált; alatta
    **teli csík** = dekódolt jelet, **pontozott vonal** = vizsgálva, de nem dekódolt.
 4. Ha egy beállítás két egyforma dekódolást kap, azonnal a következőre lép; különben az ablak
-   végéig (Beállítások › Ablak/preset) hallgat.
+   végéig (Beállítások › Ablak) hallgat.
 5. **Ha a távirányító közben abbahagyja az adást**, a képernyő alján megjelenik:
    **„Nyomd meg ujra a taviranyito gombjat!”** (és rezeg). Nyomd meg újra – a vizsgálat ott
    folytatódik, ahol abbamaradt, a korábbi eredmények megmaradnak.
@@ -47,7 +47,7 @@ Fel/le választ, OK indít, Back kilép.
 ## Eredmény
 
 - **Ismert protokoll:** név, fix kódos / ugrókódos, frekvencia, a legvalószínűbb moduláció,
-  megbízhatóság (*magas*: legalább 3 dekódolás vagy két beállításon is; *jó*: 2; *alacsony*: 1), és
+  megbízhatóság (*magas*: legalább 3 dekódolás vagy két beállításon is; *jó*: 2; *gyenge (1x)*: 1), és
   a kód első sora.
 - **„Ismeretlen protokoll – további vizsgálat szükséges.”** – jel volt, de egyik dekóder sem
   ismerte fel. Ilyenkor a moduláció csak *valószínű* (az impulzusok mintájából), és a program nem
@@ -75,7 +75,8 @@ egyetlen sikeres dekódolás elég hozzá. Ismeretlen protokollnál nincs mire t
 
 ## Mentés
 
-A *Mentés* gomb után nevet adhatsz (alapból hónap, nap, óra, perc: pl. `RA_1030_0915`). Ami az SD-kártyára kerül:
+A *Mentés* gomb után nevet adhatsz. A felajánlott név (hónap, nap, óra, perc: pl. `RA_1030_0915`) ki van
+jelölve: gépeléskor lecserélődik, OK-ra marad. Ami az SD-kártyára kerül:
 
 | Fájl | Mikor |
 | --- | --- |
@@ -92,12 +93,12 @@ egyforma szerkezetű legyen.
 
 | Beállítás | Jelentés |
 | --- | --- |
-| Language/Nyelv | **English** (alap) vagy Magyar |
+| Language | **English** (alap), Magyar vagy Deutsch |
 | Érzékenység | mitől számít jelnek: **Auto** (lent), vagy rögzítve Alacsony −65 dBm, Normál −75 dBm, Magas −85 dBm (zajos helyen az Alacsony, gyenge távirányítónál a Magas) |
-| Ablak/preset | meddig hallgat egy beállítással: Rövid 0,6 s, **Normál 1 s**, Hosszú 1,6 s |
+| Ablak | meddig hallgat egy beállítással: Rövid 0,6 s, **Normál 1 s**, Hosszú 1,6 s |
 | Mind a 4 preset | **Igen**: mindig mind a négyet kipróbálja; Nem: az első biztos dekódolásnál megáll |
 | Visszajelzés | rezgés és LED (dekódolás, újabb gombnyomás kérése, eredmény) |
-| Hibanapló (Debug log) | **Ki**; Be: minden vizsgálat naplót ír az `apps_data/rsc_remote_analyzer/debug_logs/` mappába (a vizsgálat ideje, a jelszintek és a lépések az utolsó kb. 20 másodpercből); az utolsó 5 vizsgálaté marad meg, a `debug_log_1.txt` a legújabb – hiba bejelentéséhez |
+| Hibanapló (Debug log) | **Ki**; Be: minden vizsgálat naplót ír az `apps_data/rsc_remote_analyzer/debug_logs/` mappába (a vizsgálat ideje, a jelszintek és a lépések az utolsó kb. 16 másodpercből); az utolsó 5 vizsgálaté marad meg, a `debug_log_1.txt` a legújabb – hiba bejelentéséhez |
 
 **Auto érzékenység (alap):** a program a jelet a saját frekvenciájának és vételi beállításának zajához
 méri, nem egy rögzített dBm-értékhez. A frekvenciakeresésnél minden frekvencia a saját zajszintje fölött
@@ -121,3 +122,5 @@ beállítás sem fogja.
 - A frekvencia és a moduláció megtalálása nem jelenti, hogy a protokoll is felismerhető.
 - Az első változat a belső rádiót használja (külső CC1101 modul nincs támogatva).
 - Csak azokat a protokollokat ismeri fel, amelyekhez a Momentum firmware-ben dekóder van.
+- A KeeLoq protokollt felismeri, és ugrókódosnak jelzi, de a gyártó nevét nem írja ki: a gyártói
+  kulcstárat nem tölti be, mert azzal a vizsgálathoz túl kevés memória maradt (a Sub-GHz app kiírja).

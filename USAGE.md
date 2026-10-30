@@ -6,7 +6,9 @@ tries to identify the protocol.
 
 The app **only receives, it never transmits**. On the Flipper: *Apps › Sub-GHz › RSC Remote Analyzer*.
 
-The UI is **English** by default; Hungarian can be chosen in *Settings › Language/Nyelv*.
+The UI is **English** by default; Hungarian (Magyar) or German (Deutsch) can be chosen in
+*Settings › Language* (the same label in every language). German guide: [ANLEITUNG.md](ANLEITUNG.md),
+Hungarian: [HASZNALAT.md](HASZNALAT.md).
 
 ## Main screen
 
@@ -29,7 +31,7 @@ Up/down selects, OK starts, Back exits.
    the firmware. Of the four boxes on the screen the filled one is being tried; below them a **solid
    bar** = decoded signal, a **dotted line** = tested, no decode.
 4. When a preset gets two decodes it moves on at once; otherwise it listens until the end of the window
-   (Settings › Window/preset).
+   (Settings › Window).
 5. **If the remote stops transmitting meanwhile**, the bottom of the screen shows **"Press the remote
    button again!"** (and vibrates). Press it again – the scan goes on where it stopped, earlier results
    are kept.
@@ -41,7 +43,7 @@ Up/down selects, OK starts, Back exits.
 ## Result
 
 - **Known protocol:** name, fixed code / rolling code, frequency, most likely modulation, confidence
-  (*high*: at least 3 decodes or decodes on two presets; *good*: 2; *low*: 1) and the first line of the
+  (*high*: at least 3 decodes or decodes on two presets; *good*: 2; *low (1x)*: 1) and the first line of the
   code.
 - **"Unknown protocol – further analysis needed."** – there was a signal, but no decoder recognised it.
   The modulation is then only *likely* (from the pulse pattern), and the app does not say whether it is
@@ -67,8 +69,8 @@ successful decode is enough. For an unknown protocol there is nothing to go by, 
 
 ## Saving
 
-After *Save* you can give a name (by default month, day, hour, minute: e.g. `RA_1030_0915`). What goes to
-the SD card:
+After *Save* you can give a name. The offered name (month, day, hour, minute: e.g. `RA_1030_0915`) is
+selected, so typing replaces it; OK keeps it. What goes to the SD card:
 
 | File | When |
 | --- | --- |
@@ -78,18 +80,18 @@ the SD card:
 
 The `.sub` files are in the Flipper's own format; the Sub-GHz app and ProtoView open them. The reports
 can be read in *Saved scans* on the main screen. The report file has the same English keys and values in
-both UI languages.
+every UI language.
 
 ## Settings
 
 | Setting | Meaning |
 | --- | --- |
-| Language/Nyelv | **English** or Magyar (Hungarian) |
+| Language | **English**, Magyar (Hungarian) or Deutsch (German) |
 | Sensitivity | what counts as a signal: **Auto** (below), or fixed Low −65 dBm, Normal −75 dBm, High −85 dBm (Low in a noisy place, High for a weak remote) |
-| Window/preset | how long it listens with one preset: Short 0.6 s, **Normal 1 s**, Long 1.6 s |
+| Window | how long it listens with one preset: Short 0.6 s, **Normal 1 s**, Long 1.6 s |
 | All 4 presets | **Yes**: always tries all four; No: stops at the first sure decode |
 | Feedback | vibration and LED (decode, request for another press, result) |
-| Debug log | **Off**; On: every scan writes a log to `apps_data/rsc_remote_analyzer/debug_logs/` (scan time, signal levels and steps of the last ~20 s); the last 5 scans are kept, `debug_log_1.txt` is the newest – to report a problem |
+| Debug log | **Off**; On: every scan writes a log to `apps_data/rsc_remote_analyzer/debug_logs/` (scan time, signal levels and steps of the last ~16 s); the last 5 scans are kept, `debug_log_1.txt` is the newest – to report a problem |
 
 **Auto sensitivity (default):** a signal is measured against the noise of its own frequency and preset,
 not against a fixed dBm value. In the frequency search every frequency counts a signal from 12 dB over its
@@ -112,3 +114,6 @@ received with any setting.
 - Finding the frequency and the modulation does not mean the protocol can be identified.
 - This version uses the internal radio (an external CC1101 module is not supported).
 - It recognises only the protocols the Momentum firmware has a decoder for.
+- KeeLoq is recognised and shown as rolling code, but without the manufacturer name: the manufacturer
+  keystore is not loaded, because with it the app left too little memory for a scan (the Sub-GHz app
+  shows the manufacturer).

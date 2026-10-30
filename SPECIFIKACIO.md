@@ -220,7 +220,24 @@ A megrendelő öt próbájának hibanaplója (A és B csatorna, közel és kb. 5
   High) sem kerülhet 6 dB-nél közelebb a mért zajhoz: a frekvenciakeresésnél a frekvencia saját zajához, a
   vizsgálat közben a vételi beállítás tanult zajához képest.
 
-## Következő kör (a megrendelő kérése, 2026-10-30)
+## Megvalósítás – 0.10 (2026-10-30)
 
-- **Német nyelv** a felületen (English / Magyar / Deutsch), de csak akkor, ha az olvasás már biztosan jól
-  működik.
+- **Német nyelv** (a megrendelő kérése): *Settings › Language* – English / Magyar / Deutsch, a telepítés
+  utáni alap továbbra is az angol. Minden felirat angol–magyar–német hármas (`L(en, hu, de)`); a német
+  ékezet nélkül (ae, oe, ue, ss), mert a Flipper betűkészlete nem tud umlautot. Német útmutató:
+  `ANLEITUNG.md`. A beállítás sorának neve minden nyelven „Language”, az ablaké „Window / Ablak /
+  Fenster” (a hosszabb felirat a kijelzőn levágódott).
+- **Képernyőképekkel ellenőrizve** (USB-n, a Flipper saját RPC-képfolyamával): a főcím
+  („RSC Remote Analyzer”) eddig mindkét szélén levágódott; az eredmény félkövér címe után `#` jelent meg;
+  a 27 karakternél hosszabb sorokat a Flipper szó közben törte – mindhárom nyelven javítva, a szövegek
+  kézzel tördelve.
+- **Memória:** a német változat első próbája a vizsgálat indításakor „Out of memory” hibával
+  újraindította a Flippert: nyitott app mellett csak kb. 20 KB maradt (a rendszer állapotától függően
+  10 KB-tal is kevesebb lehet, mint egy korábbi mérésnél). Nem a nyelv okozta (az app kódja kb. 25 KB). A
+  RAW-felvétel 16 bites lett (8 KB), a hibanapló 160 soros (7,5 KB), és a KeeLoq gyártói kulcstár nem
+  töltődik be (9 KB; a KeeLoq így is felismerhető és ugrókódosnak jelzett, csak a gyártó neve nélkül).
+  Mérve: nyitott app mellett 37 KB szabad, vizsgálat közben 29 KB.
+- **Mentés:** a felajánlott név ki van jelölve, gépeléskor lecserélődik (a megrendelő kérése).
+- **Ikon:** R betű (RSC).
+- A 0.7 után következő körnek felírt német nyelv ezzel elkészült (a megrendelő a 0.9 próbája után
+  engedte el: az olvasás egy távirányítóval igazoltan jó).

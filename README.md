@@ -8,9 +8,10 @@ decoder of the firmware, and shows what it found. If the remote stops transmitti
 preset was tested, it asks for another press and continues with the results it already has.
 
 The app is **receive only** – it never transmits. The UI is **English** by default, with Hungarian
-selectable in *Settings › Language/Nyelv* (Hungarian is shown without accents, the Flipper fonts have
-none). User guide: [USAGE.md](USAGE.md) (English), [HASZNALAT.md](HASZNALAT.md) (Hungarian); the original
-specification (Hungarian) is [SPECIFIKACIO.md](SPECIFIKACIO.md).
+and German selectable in *Settings › Language* (shown without accents and umlauts, the Flipper fonts
+have none). User guide: [USAGE.md](USAGE.md) (English), [HASZNALAT.md](HASZNALAT.md) (Hungarian),
+[ANLEITUNG.md](ANLEITUNG.md) (German); the original specification (Hungarian) is
+[SPECIFIKACIO.md](SPECIFIKACIO.md).
 
 ## How it works
 
@@ -54,8 +55,15 @@ The report keeps English keys and values in both UI languages.
 
 ## Translations
 
-Every UI string is an English/Hungarian pair in the source, picked by the `L(en, hu)` macro from the
-language setting (`g_lang`); string arrays are indexed by `[LANG_COUNT]`.
+Every UI string is an English/Hungarian/German triple in the source, picked by the `L(en, hu, de)` macro
+from the language setting (`g_lang`); string arrays are indexed by `[LANG_COUNT]`. Multi-line texts are
+broken by hand at about 27 characters: the Flipper's text views break lines inside words.
+
+## Memory
+
+With the app open the Flipper has only about 35-40 KB of heap left; a scan takes about 8 KB more (and
+another 7.5 KB with the debug log on). To keep that margin the RAW capture is stored in 16 bits and the
+KeeLoq manufacturer keystore is not loaded (KeeLoq is still decoded, without the manufacturer name).
 
 ## Build
 
