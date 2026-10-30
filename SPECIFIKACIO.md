@@ -168,3 +168,25 @@ próbák alapján.
 - Távirányító nélkül a gyűjtött csúcsok miatt a zaj (387 MHz) a küszöbig felért; a finom keresés kiszűrte.
   Hogy a „megerősített frekvencia marad” szabály se engedje át, az csak egyértelmű jelnél (a beállítás
   fölött legalább 6 dB) érvényes.
+
+## Megvalósítás – 0.6 (2026-10-30)
+
+A megrendelő öt próbájának hibanaplója (A és B csatorna, közel és kb. 50 cm-ről) alapján:
+
+- **Automatikus érzékenység** (a megrendelő döntése; *Sensitivity › Auto*, ez az alap): a frekvenciakeresésnél
+  minden listás frekvencia a saját zajbecslése (a legkisebb mért érték, lassan emelkedve) fölött 12 dB-től
+  számít jelnek; a vizsgálat közben az újabb gombnyomás a beállítás zaja (a csendes mérésekből tanulva, a
+  beállítás jellemző zajszintje körül ±10 dB-en belül) fölött 10 dB-től. A Low / Normal / High rögzített
+  küszöbként megmaradt. A régi beállításfájl (1. változat) Normal értéke Auto lesz, a másik kettő marad.
+  Távirányító nélkül 30 s zajból nem talált jelet; a zajos frekvenciák (387, 418 MHz) maguktól magasabb
+  küszöböt kaptak.
+- **A sikeres dekódolás mindig jelnek számít.** Az 50 cm-es próbában az AM650 −83…−85 dBm-en négyszer
+  dekódolt, a program mégis újabb gombnyomást kért, mert a jelerősség a küszöb alatt volt.
+- **A gombnyomás küszöbe a frekvenciakeresésnél mért szintből jön** (rögzített érzékenységnél), nem a
+  vizsgálat közben mért csúcsból – az 50 cm-es próbában a közelebbi AM270-csúcs miatt lett szigorúbb.
+- **Felharmonikus:** a tűrés ±0,1 % (eddig ±0,5 %, emiatt a 433,22 MHz-et választotta); a fele
+  frekvenciákat a program azonnal, több méréssel megméri, és csak valódi jelnél vált.
+- **Szomszédos frekvenciák:** a találat ±1 MHz-es környezetében a listás frekvenciákat közvetlenül megméri,
+  és a legerősebbet tartja meg (a széles szűrő a szomszéd frekvencián is erős jelet mutat).
+- **A naplóban minden dekódolás** a protokoll nevével és a kód lenyomatával (a csatornák így
+  megkülönböztethetők), a frekvenciakeresés másodpercenként egy sorral.
