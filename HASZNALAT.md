@@ -6,8 +6,12 @@ frekvenciát, végigpróbálja a négy vételi beállítást, és megpróbálja 
 
 Az alkalmazás **csak vesz, soha nem ad**. Helye a Flipperen: *Apps › Sub-GHz › RSC Remote Analyzer*.
 
+**A felület telepítés után angol.** Magyarra a *Settings › Language/Nyelv* sorban lehet váltani (a sor
+neve mindkét nyelven ugyanez, hogy bármelyik nyelvről megtalálható legyen). Az útmutató a magyar
+feliratokat idézi; az angol változat a [USAGE.md](USAGE.md).
+
 > A Flipper beépített betűkészlete nem tud ékezetes betűt, ezért a képernyőn ékezet nélkül áll minden
-> szöveg („Automatikus vizsgalat”).
+> magyar szöveg („Automatikus vizsgalat”).
 
 ## Főképernyő
 
@@ -73,12 +77,15 @@ A *Mentés* gomb után nevet adhatsz (alapból hónap, nap, óra, perc: pl. `RA_
 | `subghz/rsc_remote_analyzer/<név>.sub` – Flipper SubGhz RAW File (elemzéshez) | ismeretlen protokollnál, ha volt felvétel |
 
 A `.sub` fájlok a Flipper saját formátumában vannak, a Sub-GHz alkalmazás és a ProtoView is
-megnyitja őket. A jelentések a főképernyő *Mentett vizsgálatok* menüjében olvashatók.
+megnyitja őket. A jelentések a főképernyő *Mentett vizsgálatok* menüjében olvashatók. A jelentés
+kulcsai és értékei (pl. `Confidence: high`) a felület nyelvétől függetlenül angolok, hogy minden mentés
+egyforma szerkezetű legyen.
 
 ## Beállítások
 
 | Beállítás | Jelentés |
 | --- | --- |
+| Language/Nyelv | **English** (alap) vagy Magyar |
 | Érzékenység | mitől számít jelnek: Alacsony −65 dBm, **Normál −75 dBm**, Magas −85 dBm (zajos helyen az Alacsony, gyenge távirányítónál a Magas) |
 | Ablak/preset | meddig hallgat egy beállítással: Rövid 0,6 s, **Normál 1 s**, Hosszú 1,6 s |
 | Mind a 4 preset | **Igen**: mindig mind a négyet kipróbálja; Nem: az első biztos dekódolásnál megáll |

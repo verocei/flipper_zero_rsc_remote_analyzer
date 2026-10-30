@@ -44,7 +44,7 @@
 #define TAG "RscRemoteAnalyzer"
 
 #define APP_NAME    "RSC Remote Analyzer"
-#define APP_VERSION "0.1"
+#define APP_VERSION "0.2"
 
 #define DATA_DIR      EXT_PATH("apps_data/rsc_remote_analyzer")
 #define REPORT_DIR    DATA_DIR "/reports"
@@ -76,6 +76,13 @@
 #define SNAP_HZ        75000
 #define CC1101_MDMCFG4 0x10
 
+/* UI language: index into the [LANG_COUNT] string pairs below */
+#define LANG_EN    0
+#define LANG_HU    1
+#define LANG_COUNT 2
+static uint32_t g_lang = LANG_EN;
+#define L(en, hu) (g_lang == LANG_HU ? (hu) : (en))
+
 #define FLAG_STOP   (1UL << 0)
 #define FLAG_FINISH (1UL << 1)
 
@@ -101,11 +108,18 @@ static const uint8_t preset_rank[PRESET_COUNT] = {2, 4, 3, 1};
 /* Settings                                                                   */
 
 static const int8_t sensitivity_dbm[] = {-65, -75, -85};
-static const char* const sensitivity_names[] = {"Alacsony", "Normal", "Magas"};
+static const char* const sensitivity_names[LANG_COUNT][3] = {
+    {"Low", "Normal", "High"},
+    {"Alacsony", "Normal", "Magas"},
+};
 static const uint16_t window_ms[] = {600, 1000, 1600};
-static const char* const window_names[] = {"Rovid", "Normal", "Hosszu"};
-static const char* const yes_no[] = {"Nem", "Igen"};
-static const char* const on_off[] = {"Ki", "Be"};
+static const char* const window_names[LANG_COUNT][3] = {
+    {"Short", "Normal", "Long"},
+    {"Rovid", "Normal", "Hosszu"},
+};
+static const char* const yes_no[LANG_COUNT][2] = {{"No", "Yes"}, {"Nem", "Igen"}};
+static const char* const on_off[LANG_COUNT][2] = {{"Off", "On"}, {"Ki", "Be"}};
+static const char* const language_names[LANG_COUNT] = {"English", "Magyar"};
 static const char* const manual_preset_names[] = {"Auto", "AM270", "AM650", "FM238", "FM476"};
 
 typedef struct {
@@ -113,6 +127,7 @@ typedef struct {
     uint32_t window; /* index into window_ms */
     uint32_t all_presets; /* 1 = always try all four presets */
     uint32_t feedback; /* 1 = vibro/LED feedback */
+    uint32_t language; /* LANG_EN or LANG_HU */
 } Settings;
 
 /* ------------------------------------------------------------------------- */
@@ -208,6 +223,7 @@ typedef enum {
     EvDetailCompat,
     EvNameDone,
     EvManualStart,
+    EvLanguage,
 } EventId;
 
 #define MAIN_ITEMS 4
@@ -313,11 +329,11 @@ static void feedback(App* app, const NotificationSequence* seq) {
 static const char* type_text(SubGhzProtocolType type) {
     switch(type) {
     case SubGhzProtocolTypeStatic:
-        return "Fix kodos";
+        return L("Fixed code", "Fix kodos");
     case SubGhzProtocolTypeDynamic:
-        return "Ugrokodos";
+        return L("Rolling code", "Ugrokodos");
     default:
-        return "Nem meghatarozott";
+        return L("Not determined", "Nem meghatarozott");
     }
 }
 
@@ -340,6 +356,7 @@ static void settings_defaults(Settings* s) {
     s->window = 1;
     s->all_presets = 1;
     s->feedback = 1;
+    s->language = LANG_EN;
 }
 
 static void settings_load(App* app) {
@@ -360,7 +377,11 @@ static void settings_load(App* app) {
         if(flipper_format_read_uint32(ff, "All_presets", &v, 1)) app->settings.all_presets = v ? 1 : 0;
         flipper_format_rewind(ff);
         if(flipper_format_read_uint32(ff, "Feedback", &v, 1)) app->settings.feedback = v ? 1 : 0;
+        flipper_format_rewind(ff);
+        if(flipper_format_read_uint32(ff, "Language", &v, 1) && v < LANG_COUNT)
+            app->settings.language = v;
     }
+    g_lang = app->settings.language;
     furi_string_free(header);
     flipper_format_free(ff);
 }
@@ -374,6 +395,7 @@ static void settings_save(App* app) {
         flipper_format_write_uint32(ff, "Window", &app->settings.window, 1);
         flipper_format_write_uint32(ff, "All_presets", &app->settings.all_presets, 1);
         flipper_format_write_uint32(ff, "Feedback", &app->settings.feedback, 1);
+        flipper_format_write_uint32(ff, "Language", &app->settings.language, 1);
     }
     flipper_format_free(ff);
 }
@@ -627,10 +649,24 @@ static uint8_t presets_with_decode(Candidate* c) {
     return n;
 }
 
+/* 0 = high, 1 = good, 2 = low (a single decode) */
+static uint8_t confidence_level(Candidate* c) {
+    if(c->count >= 3 || presets_with_decode(c) >= 2) return 0;
+    if(c->count == 2) return 1;
+    return 2;
+}
+
 static const char* confidence_text(Candidate* c) {
-    if(c->count >= 3 || presets_with_decode(c) >= 2) return "magas";
-    if(c->count == 2) return "jo";
-    return "alacsony (egyszeri)";
+    static const char* const texts[LANG_COUNT][3] = {
+        {"high", "good", "low (single)"},
+        {"magas", "jo", "alacsony (egyszeri)"},
+    };
+    return texts[g_lang][confidence_level(c)];
+}
+
+static const char* confidence_key(Candidate* c) {
+    static const char* const keys[] = {"high", "good", "low"};
+    return keys[confidence_level(c)];
 }
 
 static bool preset_wanted(Analysis* an, uint8_t i) {
@@ -713,13 +749,13 @@ static bool frequency_sweep(App* app) {
             best_f = app->freqs[i];
         }
     }
-    update_model(app, true, best, "Tartsd nyomva a gombot!", false);
+    update_model(app, true, best, L("Hold the remote button!", "Tartsd nyomva a gombot!"), false);
     if(best < app->threshold || best_f == 0) return false;
 
     float confirm = measure(app, best_f, 5);
     if(confirm < app->threshold - 3.0f) return false;
 
-    update_model(app, true, confirm, "Frekvencia pontositasa", false);
+    update_model(app, true, confirm, L("Refining frequency", "Frekvencia pontositasa"), false);
     subghz_devices_idle(app->device);
     subghz_devices_load_preset(app->device, FuriHalSubGhzPresetCustom, app->narrow_preset);
 
@@ -806,7 +842,7 @@ static bool modulation_tick(App* app) {
     bool active = rssi > app->threshold;
     PresetResult* p = &an->pr[an->current];
     char status[40];
-    snprintf(status, sizeof(status), "Vizsgalat: %s", presets[an->current].name);
+    snprintf(status, sizeof(status), L("Testing: %s", "Vizsgalat: %s"), presets[an->current].name);
 
     if(active) {
         if(!w->started) {
@@ -836,7 +872,7 @@ static bool modulation_tick(App* app) {
             rx_stop(app);
             an->freq_found = false;
             an->phase = PhaseFreq;
-            update_model(app, true, rssi, "Frekvencia ujrakeresese", false);
+            update_model(app, true, rssi, L("Searching frequency again", "Frekvencia ujrakeresese"), false);
             return false;
         }
         update_model(app, false, rssi, prompt ? NULL : status, prompt);
@@ -888,7 +924,9 @@ static int32_t worker_thread(void* context) {
         if(first >= 0) start_preset(app, first);
     }
     update_model(
-        app, true, -200.0f, app->an.phase == PhaseFreq ? "Tartsd nyomva a gombot!" : "Vizsgalat", false);
+        app, true, -200.0f, app->an.phase == PhaseFreq ? L("Hold the remote button!", "Tartsd nyomva a gombot!") :
+                                    L("Scanning", "Vizsgalat"),
+        false);
 
     while(true) {
         uint32_t flags = furi_thread_flags_wait(
@@ -927,10 +965,9 @@ static int32_t worker_thread(void* context) {
 /* ------------------------------------------------------------------------- */
 /* Main screen                                                                */
 
-static const char* const main_small_items[] = {
-    "Kezi vizsgalat",
-    "Mentett vizsgalatok",
-    "Beallitasok",
+static const char* const main_small_items[LANG_COUNT][3] = {
+    {"Manual scan", "Saved scans", "Settings"},
+    {"Kezi vizsgalat", "Mentett vizsgalatok", "Beallitasok"},
 };
 
 static void main_draw(Canvas* canvas, void* model) {
@@ -947,18 +984,18 @@ static void main_draw(Canvas* canvas, void* model) {
         canvas_draw_rframe(canvas, 3, 12, 122, 23, 3);
         canvas_draw_rframe(canvas, 4, 13, 120, 21, 2);
     }
-    canvas_draw_str_aligned(canvas, 64, 15, AlignCenter, AlignTop, "Automatikus");
-    canvas_draw_str_aligned(canvas, 64, 24, AlignCenter, AlignTop, "vizsgalat");
+    canvas_draw_str_aligned(canvas, 64, 15, AlignCenter, AlignTop, L("Automatic", "Automatikus"));
+    canvas_draw_str_aligned(canvas, 64, 24, AlignCenter, AlignTop, L("scan", "vizsgalat"));
     canvas_set_color(canvas, ColorBlack);
 
     canvas_set_font(canvas, FontSecondary);
-    for(uint8_t i = 0; i < COUNT_OF(main_small_items); i++) {
+    for(uint8_t i = 0; i < COUNT_OF(main_small_items[0]); i++) {
         uint8_t y = 37 + i * 9;
         if(m->selected == i + 1) {
             canvas_draw_box(canvas, 0, y, 128, 9);
             canvas_set_color(canvas, ColorWhite);
         }
-        canvas_draw_str_aligned(canvas, 64, y + 1, AlignCenter, AlignTop, main_small_items[i]);
+        canvas_draw_str_aligned(canvas, 64, y + 1, AlignCenter, AlignTop, main_small_items[g_lang][i]);
         canvas_set_color(canvas, ColorBlack);
     }
 }
@@ -999,12 +1036,12 @@ static void scan_draw(Canvas* canvas, void* model) {
 
     canvas_set_font(canvas, FontPrimary);
     if(m->phase == PhaseFreq)
-        canvas_draw_str(canvas, 0, 9, "Frekvencia keresese");
+        canvas_draw_str(canvas, 0, 9, L("Frequency search", "Frekvencia keresese"));
     else if(m->current < PRESET_COUNT) {
-        snprintf(buf, sizeof(buf), "Modulacio: %s", presets[m->current].name);
+        snprintf(buf, sizeof(buf), L("Modulation: %s", "Modulacio: %s"), presets[m->current].name);
         canvas_draw_str(canvas, 0, 9, buf);
     } else
-        canvas_draw_str(canvas, 0, 9, "Kiertekeles");
+        canvas_draw_str(canvas, 0, 9, L("Evaluating", "Kiertekeles"));
 
     canvas_set_font(canvas, FontSecondary);
     if(m->freq_known)
@@ -1044,19 +1081,19 @@ static void scan_draw(Canvas* canvas, void* model) {
     if(m->protocol[0]) {
         snprintf(buf, sizeof(buf), "Prot: %s", m->protocol);
     } else {
-        strlcpy(buf, m->phase == PhaseFreq ? "Prot: -" : "Prot: kereses...", sizeof(buf));
+        strlcpy(buf, m->phase == PhaseFreq ? "Prot: -" : L("Prot: searching...", "Prot: kereses..."), sizeof(buf));
     }
     canvas_draw_str(canvas, 0, 42, buf);
 
     if(m->prompt) {
         canvas_draw_rbox(canvas, 0, 44, 128, 20, 3);
         canvas_set_color(canvas, ColorWhite);
-        canvas_draw_str_aligned(canvas, 64, 52, AlignCenter, AlignBottom, "Nyomd meg ujra a");
-        canvas_draw_str_aligned(canvas, 64, 62, AlignCenter, AlignBottom, "taviranyito gombjat!");
+        canvas_draw_str_aligned(canvas, 64, 52, AlignCenter, AlignBottom, L("Press the remote", "Nyomd meg ujra a"));
+        canvas_draw_str_aligned(canvas, 64, 62, AlignCenter, AlignBottom, L("button again!", "taviranyito gombjat!"));
         canvas_set_color(canvas, ColorBlack);
     } else {
         canvas_draw_str(canvas, 0, 52, m->status);
-        canvas_draw_str(canvas, 0, 62, "OK=eredmeny  Back=kilepes");
+        canvas_draw_str(canvas, 0, 62, L("OK=result  Back=exit", "OK=eredmeny  Back=kilepes"));
     }
 }
 
@@ -1123,16 +1160,16 @@ static void preset_line(FuriString* out, Analysis* an, uint8_t i) {
     PresetResult* p = &an->pr[i];
     furi_string_cat_printf(out, "%s: ", presets[i].name);
     if(!preset_wanted(an, i)) {
-        furi_string_cat_str(out, "nem kert\n");
+        furi_string_cat_str(out, L("not requested\n", "nem kert\n"));
     } else if(!p->done && !p->signal_seen) {
-        furi_string_cat_str(out, "nem vizsgalt\n");
+        furi_string_cat_str(out, L("not tested\n", "nem vizsgalt\n"));
     } else if(p->decodes) {
-        furi_string_cat_printf(out, "%u dekodolas\n", p->decodes);
+        furi_string_cat_printf(out, L("%u decodes\n", "%u dekodolas\n"), p->decodes);
     } else if(p->signal_seen) {
         furi_string_cat_printf(
-            out, "jel %lu ms, nincs dekodolas\n", (unsigned long)p->span_ms);
+            out, L("signal %lu ms, no decode\n", "jel %lu ms, nincs dekodolas\n"), (unsigned long)p->span_ms);
     } else {
-        furi_string_cat_str(out, "nem kapott jelet\n");
+        furi_string_cat_str(out, L("no signal\n", "nem kapott jelet\n"));
     }
 }
 
@@ -1154,9 +1191,9 @@ static void build_result(App* app) {
         furi_string_cat_printf(s, "%s\n", type_text(c->type));
         format_freq_long(s, an->freq_nominal);
         furi_string_cat_printf(s, "  %s\n", presets[bp].name);
-        furi_string_cat_printf(s, "Megbizhatosag: %s\n", confidence_text(c));
+        furi_string_cat_printf(s, L("Confidence: %s\n", "Megbizhatosag: %s\n"), confidence_text(c));
         if(c->type == SubGhzProtocolTypeDynamic)
-            furi_string_cat_str(s, "Parositas szukseges a vevovel.\n");
+            furi_string_cat_str(s, L("Must be paired with the receiver.\n", "Parositas szukseges a vevovel.\n"));
         /* The first line of the decoder text usually holds the key */
         size_t nl = furi_string_search_char(c->info, '\n');
         if(nl != FURI_STRING_FAILURE) {
@@ -1168,19 +1205,21 @@ static void build_result(App* app) {
             furi_string_free(rest);
         }
     } else if(signal_detected(an)) {
-        furi_string_cat_str(s, "\e#Ismeretlen protokoll\e#\n");
-        furi_string_cat_str(s, "tovabbi vizsgalat szukseges.\n");
-        furi_string_cat_str(s, "Jel: ");
+        furi_string_cat_str(s, L("\e#Unknown protocol\e#\n", "\e#Ismeretlen protokoll\e#\n"));
+        furi_string_cat_str(s, L("further analysis needed.\n", "tovabbi vizsgalat szukseges.\n"));
+        furi_string_cat_str(s, L("Signal: ", "Jel: "));
         format_freq_long(s, an->freq_nominal);
         furi_string_cat_printf(s, ", %d dBm\n", (int)an->rssi_peak);
         if(an->raw_best_score > 0)
             furi_string_cat_printf(
-                s, "Valoszinu: %s (nem biztos)\n", presets[an->raw_best_preset].name);
-        furi_string_cat_str(s, "Fix vagy ugrokod: nem tudhato.\n");
+                s, L("Likely: %s (not sure)\n", "Valoszinu: %s (nem biztos)\n"), presets[an->raw_best_preset].name);
+        furi_string_cat_str(s, L("Fixed or rolling: unknown.\n", "Fix vagy ugrokod: nem tudhato.\n"));
     } else {
-        furi_string_cat_str(s, "\e#Nem erkezett jel\e#\n");
-        furi_string_cat_str(s, "Tartsd a taviranyitot a Flipper\nkozeleben, es nyomd meg a\n");
-        furi_string_cat_str(s, "gombjat a vizsgalat alatt.\n");
+        furi_string_cat_str(s, L("\e#No signal received\e#\n", "\e#Nem erkezett jel\e#\n"));
+        furi_string_cat_str(
+            s,
+            L("Hold the remote close to the\nFlipper and press its button\nduring the scan.\n",
+              "Tartsd a taviranyitot a Flipper\nkozeleben, es nyomd meg a\ngombjat a vizsgalat alatt.\n"));
     }
 
     if(app->best >= 0)
@@ -1194,10 +1233,10 @@ static void result_button(GuiButtonType button, InputType type, void* context);
 static void show_result(App* app) {
     widget_reset(app->result);
     widget_add_text_scroll_element(app->result, 0, 0, 128, 51, furi_string_get_cstr(app->summary));
-    widget_add_button_element(app->result, GuiButtonTypeLeft, "Uj", result_button, app);
+    widget_add_button_element(app->result, GuiButtonTypeLeft, L("New", "Uj"), result_button, app);
     bool can_save = app->best >= 0 || signal_detected(&app->an);
-    if(can_save) widget_add_button_element(app->result, GuiButtonTypeCenter, "Mentes", result_button, app);
-    widget_add_button_element(app->result, GuiButtonTypeRight, "Tobb", result_button, app);
+    if(can_save) widget_add_button_element(app->result, GuiButtonTypeCenter, L("Save", "Mentes"), result_button, app);
+    widget_add_button_element(app->result, GuiButtonTypeRight, L("More", "Tobb"), result_button, app);
     switch_to(app, ViewResult);
 }
 
@@ -1216,18 +1255,19 @@ static void detail_data_text(App* app, FuriString* out) {
     Analysis* an = &app->an;
     furi_string_reset(out);
     if(app->best < 0) {
-        furi_string_cat_str(out, "Nincs dekodolt adat.\n\n");
+        furi_string_cat_str(out, L("No decoded data.\n\n", "Nincs dekodolt adat.\n\n"));
         if(an->freq_found) {
-            furi_string_cat_str(out, "Mert frekvencia: ");
+            furi_string_cat_str(out, L("Measured freq: ", "Mert frekvencia: "));
             format_freq_long(out, an->freq_measured);
-            furi_string_cat_str(out, "\nHasznalt frekvencia: ");
+            furi_string_cat_str(out, L("\nUsed freq: ", "\nHasznalt frekvencia: "));
             format_freq_long(out, an->freq_nominal);
-            furi_string_cat_printf(out, "\nCsucs jelszint: %d dBm\n", (int)an->rssi_peak);
+            furi_string_cat_printf(out, L("\nPeak level: %d dBm\n", "\nCsucs jelszint: %d dBm\n"), (int)an->rssi_peak);
         }
         if(an->raw_best_n)
             furi_string_cat_printf(
                 out,
-                "RAW felvetel: %u ertek (%s)\nMentheto, a Sub-GHz appban\nvagy ProtoView-ban vizsgalhato.\n",
+                L("RAW capture: %u values (%s)\nCan be saved and studied in\nSub-GHz or ProtoView.\n",
+                  "RAW felvetel: %u ertek (%s)\nMentheto, a Sub-GHz appban\nvagy ProtoView-ban vizsgalhato.\n"),
                 (unsigned)an->raw_best_n,
                 presets[an->raw_best_preset].name);
         return;
@@ -1235,38 +1275,40 @@ static void detail_data_text(App* app, FuriString* out) {
     Candidate* c = &an->cand[app->best];
     furi_string_cat_printf(out, "%s (%s)\n", c->name, type_text(c->type));
     furi_string_cat(out, c->info);
-    furi_string_cat_str(out, "\n\nMert frekvencia: ");
+    furi_string_cat_str(out, L("\n\nMeasured freq: ", "\n\nMert frekvencia: "));
     format_freq_long(out, an->freq_measured);
-    furi_string_cat_printf(out, "\nCsucs jelszint: %d dBm\n", (int)an->rssi_peak);
-    furi_string_cat_printf(out, "Dekodolasok: %u\n", c->count);
-    furi_string_cat_printf(out, "Azonos ismetles: %u\n", c->repeats);
-    furi_string_cat_printf(out, "Elterokod: %u\n", c->changes);
+    furi_string_cat_printf(out, L("\nPeak level: %d dBm\n", "\nCsucs jelszint: %d dBm\n"), (int)an->rssi_peak);
+    furi_string_cat_printf(out, L("Decodes: %u\n", "Dekodolasok: %u\n"), c->count);
+    furi_string_cat_printf(out, L("Same repeats: %u\n", "Azonos ismetles: %u\n"), c->repeats);
+    furi_string_cat_printf(out, L("Code changes: %u\n", "Elterokod: %u\n"), c->changes);
     for(int8_t i = 0; i < CAND_MAX; i++) {
         if(i == app->best || !an->cand[i].used) continue;
         furi_string_cat_printf(
-            out, "Mas protokoll is: %s (%u)\n", an->cand[i].name, an->cand[i].count);
+            out, L("Also seen: %s (%u)\n", "Mas protokoll is: %s (%u)\n"), an->cand[i].name, an->cand[i].count);
     }
 }
 
 static void detail_modulation_text(App* app, FuriString* out) {
     Analysis* an = &app->an;
     furi_string_reset(out);
-    furi_string_cat_str(out, "Vetelei beallitasok:\n");
+    furi_string_cat_str(out, L("Receive presets:\n", "Vetelei beallitasok:\n"));
     for(uint8_t i = 0; i < PRESET_COUNT; i++) preset_line(out, an, i);
     if(app->best >= 0) {
         furi_string_cat_printf(
             out,
-            "\nLegvaloszinubb: %s\n(a legtobb dekodolas)\n",
+            L("\nMost likely: %s\n(the most decodes)\n", "\nLegvaloszinubb: %s\n(a legtobb dekodolas)\n"),
             presets[best_preset_of(&an->cand[app->best])].name);
     } else if(an->raw_best_score > 0) {
         furi_string_cat_printf(
             out,
-            "\nValoszinu: %s\n(impulzusminta alapjan,\nnem biztos)\n",
+            L("\nLikely: %s\n(from the pulse pattern,\nnot sure)\n",
+              "\nValoszinu: %s\n(impulzusminta alapjan,\nnem biztos)\n"),
             presets[an->raw_best_preset].name);
     }
     furi_string_cat_str(
         out,
-        "\nJelek a kepernyon:\nteli csik = dekodolt,\npontozott = vizsgalt, nincs\ndekodolas.\n");
+        L("\nScreen marks:\nsolid bar = decoded,\ndotted = tested, no decode.\n",
+          "\nJelek a kepernyon:\nteli csik = dekodolt,\npontozott = vizsgalt, nincs\ndekodolas.\n"));
 }
 
 static void detail_compat_text(App* app, FuriString* out) {
@@ -1275,33 +1317,45 @@ static void detail_compat_text(App* app, FuriString* out) {
     if(app->best < 0) {
         furi_string_cat_str(
             out,
-            "Ismeretlen protokoll - tovabbi\nvizsgalat szukseges.\n\n"
-            "Nem tudhato, hogy fix vagy\nugrokodos. A jel fogasa nem\nazonos a protokoll\n"
-            "felismeresevel.\n\nA RAW felvetel a Sub-GHz\nappban (Read RAW) vagy\n"
-            "ProtoView-ban tovabb\nvizsgalhato.\n");
+            L("Unknown protocol - further\nanalysis needed.\n\n"
+              "Fixed or rolling code cannot\nbe told. Receiving a signal\nis not the same as\n"
+              "identifying its protocol.\n\nThe RAW capture can be\nstudied further in Sub-GHz\n"
+              "(Read RAW) or ProtoView.\n",
+              "Ismeretlen protokoll - tovabbi\nvizsgalat szukseges.\n\n"
+              "Nem tudhato, hogy fix vagy\nugrokodos. A jel fogasa nem\nazonos a protokoll\n"
+              "felismeresevel.\n\nA RAW felvetel a Sub-GHz\nappban (Read RAW) vagy\n"
+              "ProtoView-ban tovabb\nvizsgalhato.\n"));
         return;
     }
     Candidate* c = &an->cand[app->best];
     if(c->type == SubGhzProtocolTypeDynamic) {
         furi_string_cat_str(
             out,
-            "Ugrokodos protokoll.\n\n"
-            "Egyszeru rogzitessel es\nvisszajatszassal nem\nmasolhato: minden gombnyomas\n"
-            "uj kodot kuld.\n\nUj taviranyitot a vevoegyseg\nkezikonyve szerint, a vevovel\n"
-            "parositva lehet hasznalni.\n\nA mentes csak az elemzest\nrogziti (.sub nem keszul).\n");
+            L("Rolling code protocol.\n\n"
+              "It cannot be copied by simple\nrecording and replay: every\npress sends a new code.\n\n"
+              "A new remote has to be paired\nwith the receiver as its\nmanual describes.\n\n"
+              "Saving keeps the analysis\nonly (no .sub file).\n",
+              "Ugrokodos protokoll.\n\n"
+              "Egyszeru rogzitessel es\nvisszajatszassal nem\nmasolhato: minden gombnyomas\n"
+              "uj kodot kuld.\n\nUj taviranyitot a vevoegyseg\nkezikonyve szerint, a vevovel\n"
+              "parositva lehet hasznalni.\n\nA mentes csak az elemzest\nrogziti (.sub nem keszul).\n"));
     } else if(c->type == SubGhzProtocolTypeStatic) {
         furi_string_cat_str(
             out,
-            "Fix kodos protokoll.\n\n"
-            "A kod minden gombnyomasnal\nugyanaz. Mentes utan a .sub\nfajl a Sub-GHz appban\n"
-            "(Saved) megnyithato.\n\nKuldeni csak sajat rendszeren,\na helyi szabalyok szerint\n"
-            "szabad.\n");
+            L("Fixed code protocol.\n\n"
+              "Every press sends the same\ncode. After saving, the .sub\nfile opens in the Sub-GHz\n"
+              "app (Saved).\n\nTransmit only on your own\nsystem and within the local\nrules.\n",
+              "Fix kodos protokoll.\n\n"
+              "A kod minden gombnyomasnal\nugyanaz. Mentes utan a .sub\nfajl a Sub-GHz appban\n"
+              "(Saved) megnyithato.\n\nKuldeni csak sajat rendszeren,\na helyi szabalyok szerint\n"
+              "szabad.\n"));
     } else {
         furi_string_cat_str(
             out,
-            "A protokoll mukodese (fix vagy\nugrokod) nem allapithato meg\nbiztosan.\n");
+            L("Whether the protocol uses a\nfixed or rolling code cannot\nbe told for sure.\n",
+              "A protokoll mukodese (fix vagy\nugrokod) nem allapithato meg\nbiztosan.\n"));
     }
-    furi_string_cat_printf(out, "\nMegbizhatosag: %s\n", confidence_text(c));
+    furi_string_cat_printf(out, L("\nConfidence: %s\n", "\nMegbizhatosag: %s\n"), confidence_text(c));
 }
 
 static void show_text(App* app, ViewId back) {
@@ -1392,7 +1446,7 @@ static void build_report(App* app, FuriString* r, const char* name, const char* 
         furi_string_cat_printf(r, "Protocol: %s\n", c->name);
         furi_string_cat_printf(r, "Protocol_type: %s\n", type_key(c->type));
         furi_string_cat_printf(r, "Modulation: %s\n", presets[best_preset_of(c)].name);
-        furi_string_cat_printf(r, "Confidence: %s\n", confidence_text(c));
+        furi_string_cat_printf(r, "Confidence: %s\n", confidence_key(c));
         furi_string_cat_printf(
             r, "Decodes: %u\nRepeats: %u\nChanges: %u\n", c->count, c->repeats, c->changes);
     } else {
@@ -1456,7 +1510,7 @@ static void do_save(App* app) {
     if(app->best >= 0) {
         Candidate* c = &an->cand[app->best];
         if(c->type == SubGhzProtocolTypeDynamic) {
-            sub_note = "Ugrokodos: .sub nem keszult.";
+            sub_note = L("Rolling code: no .sub file.", "Ugrokodos: .sub nem keszult.");
         } else {
             storage_simply_mkdir(app->storage, EXT_PATH("subghz"));
             storage_simply_mkdir(app->storage, SUB_DIR);
@@ -1471,9 +1525,9 @@ static void do_save(App* app) {
         storage_simply_mkdir(app->storage, SUB_DIR);
         sub_ok = write_raw_sub(app, furi_string_get_cstr(sub_path));
         sub_written = sub_ok;
-        sub_note = "RAW felvetel (elemzeshez).";
+        sub_note = L("RAW capture (for analysis).", "RAW felvetel (elemzeshez).");
     } else {
-        sub_note = "Nincs mentheto jel.";
+        sub_note = L("No signal to save.", "Nincs mentheto jel.");
     }
 
     FuriString* report = furi_string_alloc();
@@ -1483,14 +1537,22 @@ static void do_save(App* app) {
 
     furi_string_reset(app->text);
     if(report_ok && sub_ok) {
-        furi_string_cat_printf(app->text, "Mentve: %s\n\nJelentes:\n%s\n", name, furi_string_get_cstr(report_path));
+        furi_string_cat_printf(
+            app->text,
+            L("Saved: %s\n\nReport:\n%s\n", "Mentve: %s\n\nJelentes:\n%s\n"),
+            name,
+            furi_string_get_cstr(report_path));
         if(sub_written)
-            furi_string_cat_printf(app->text, "\nJel:\n%s\n", furi_string_get_cstr(sub_path));
+            furi_string_cat_printf(app->text, L("\nSignal:\n%s\n", "\nJel:\n%s\n"), furi_string_get_cstr(sub_path));
         if(sub_note[0]) furi_string_cat_printf(app->text, "\n%s\n", sub_note);
         if(sub_written && app->best >= 0)
-            furi_string_cat_str(app->text, "\nA Sub-GHz app Saved\nmenujeben is megtalalhato.\n");
+            furi_string_cat_str(
+                app->text,
+                L("\nAlso listed in the Sub-GHz\napp under Saved.\n",
+                  "\nA Sub-GHz app Saved\nmenujeben is megtalalhato.\n"));
     } else {
-        furi_string_cat_str(app->text, "Mentesi hiba!\nEllenorizd az SD-kartyat.\n");
+        furi_string_cat_str(
+            app->text, L("Save error!\nCheck the SD card.\n", "Mentesi hiba!\nEllenorizd az SD-kartyat.\n"));
     }
     furi_string_free(report_path);
     furi_string_free(sub_path);
@@ -1516,7 +1578,7 @@ static void show_saved(App* app) {
             }
             furi_string_free(line);
         } else {
-            furi_string_set(app->text, "A fajl nem olvashato.");
+            furi_string_set(app->text, L("The file cannot be read.", "A fajl nem olvashato."));
         }
         file_stream_close(stream);
         stream_free(stream);
@@ -1532,7 +1594,7 @@ static void set_sensitivity(VariableItem* item) {
     App* app = variable_item_get_context(item);
     uint8_t i = variable_item_get_current_value_index(item);
     app->settings.sensitivity = i;
-    variable_item_set_current_value_text(item, sensitivity_names[i]);
+    variable_item_set_current_value_text(item, sensitivity_names[g_lang][i]);
     settings_save(app);
 }
 
@@ -1540,7 +1602,7 @@ static void set_window(VariableItem* item) {
     App* app = variable_item_get_context(item);
     uint8_t i = variable_item_get_current_value_index(item);
     app->settings.window = i;
-    variable_item_set_current_value_text(item, window_names[i]);
+    variable_item_set_current_value_text(item, window_names[g_lang][i]);
     settings_save(app);
 }
 
@@ -1548,7 +1610,7 @@ static void set_all_presets(VariableItem* item) {
     App* app = variable_item_get_context(item);
     uint8_t i = variable_item_get_current_value_index(item);
     app->settings.all_presets = i;
-    variable_item_set_current_value_text(item, yes_no[i]);
+    variable_item_set_current_value_text(item, yes_no[g_lang][i]);
     settings_save(app);
 }
 
@@ -1556,27 +1618,46 @@ static void set_feedback(VariableItem* item) {
     App* app = variable_item_get_context(item);
     uint8_t i = variable_item_get_current_value_index(item);
     app->settings.feedback = i;
-    variable_item_set_current_value_text(item, on_off[i]);
+    variable_item_set_current_value_text(item, on_off[g_lang][i]);
     settings_save(app);
+}
+
+static void set_language(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    uint8_t i = variable_item_get_current_value_index(item);
+    app->settings.language = i;
+    g_lang = i;
+    variable_item_set_current_value_text(item, language_names[i]);
+    settings_save(app);
+    /* The other labels change too: rebuild the list outside this callback */
+    view_dispatcher_send_custom_event(app->vd, EvLanguage);
 }
 
 static void build_settings_list(App* app) {
     VariableItemList* list = app->settings_list;
     variable_item_list_reset(list);
     VariableItem* item;
-    item = variable_item_list_add(list, "Erzekenyseg", COUNT_OF(sensitivity_names), set_sensitivity, app);
+    /* Bilingual label, so the item can be found in either language */
+    item = variable_item_list_add(list, "Language/Nyelv", LANG_COUNT, set_language, app);
+    variable_item_set_current_value_index(item, g_lang);
+    variable_item_set_current_value_text(item, language_names[g_lang]);
+    item = variable_item_list_add(
+        list, L("Sensitivity", "Erzekenyseg"), COUNT_OF(sensitivity_names[0]), set_sensitivity, app);
     variable_item_set_current_value_index(item, app->settings.sensitivity);
-    variable_item_set_current_value_text(item, sensitivity_names[app->settings.sensitivity]);
-    item = variable_item_list_add(list, "Ablak/preset", COUNT_OF(window_names), set_window, app);
+    variable_item_set_current_value_text(item, sensitivity_names[g_lang][app->settings.sensitivity]);
+    item = variable_item_list_add(
+        list, L("Window/preset", "Ablak/preset"), COUNT_OF(window_names[0]), set_window, app);
     variable_item_set_current_value_index(item, app->settings.window);
-    variable_item_set_current_value_text(item, window_names[app->settings.window]);
-    item = variable_item_list_add(list, "Mind a 4 preset", COUNT_OF(yes_no), set_all_presets, app);
+    variable_item_set_current_value_text(item, window_names[g_lang][app->settings.window]);
+    item = variable_item_list_add(
+        list, L("All 4 presets", "Mind a 4 preset"), COUNT_OF(yes_no[0]), set_all_presets, app);
     variable_item_set_current_value_index(item, app->settings.all_presets);
-    variable_item_set_current_value_text(item, yes_no[app->settings.all_presets]);
-    item = variable_item_list_add(list, "Visszajelzes", COUNT_OF(on_off), set_feedback, app);
+    variable_item_set_current_value_text(item, yes_no[g_lang][app->settings.all_presets]);
+    item = variable_item_list_add(
+        list, L("Feedback", "Visszajelzes"), COUNT_OF(on_off[0]), set_feedback, app);
     variable_item_set_current_value_index(item, app->settings.feedback);
-    variable_item_set_current_value_text(item, on_off[app->settings.feedback]);
-    item = variable_item_list_add(list, "Verzio", 1, NULL, app);
+    variable_item_set_current_value_text(item, on_off[g_lang][app->settings.feedback]);
+    item = variable_item_list_add(list, L("Version", "Verzio"), 1, NULL, app);
     variable_item_set_current_value_text(item, APP_VERSION);
 }
 
@@ -1603,15 +1684,15 @@ static void build_manual_list(App* app) {
     VariableItemList* list = app->manual_list;
     variable_item_list_reset(list);
     char buf[20];
-    VariableItem* item = variable_item_list_add(list, "Frekvencia", app->freq_count, set_manual_freq, app);
+    VariableItem* item = variable_item_list_add(list, L("Frequency", "Frekvencia"), app->freq_count, set_manual_freq, app);
     variable_item_set_current_value_index(item, app->manual_freq);
     format_freq(buf, sizeof(buf), app->freqs[app->manual_freq]);
     variable_item_set_current_value_text(item, buf);
     item = variable_item_list_add(
-        list, "Modulacio", COUNT_OF(manual_preset_names), set_manual_preset, app);
+        list, L("Modulation", "Modulacio"), COUNT_OF(manual_preset_names), set_manual_preset, app);
     variable_item_set_current_value_index(item, app->manual_preset);
     variable_item_set_current_value_text(item, manual_preset_names[app->manual_preset]);
-    item = variable_item_list_add(list, "Inditas (OK)", 1, NULL, app);
+    item = variable_item_list_add(list, L("Start (OK)", "Inditas (OK)"), 1, NULL, app);
     variable_item_set_current_value_text(item, ">");
     variable_item_list_set_enter_callback(list, manual_enter, app);
 }
@@ -1674,6 +1755,10 @@ static bool custom_event_callback(void* context, uint32_t event) {
         build_settings_list(app);
         switch_to(app, ViewSettings);
         return true;
+    case EvLanguage:
+        build_settings_list(app);
+        variable_item_list_set_selected_item(app->settings_list, 0);
+        return true;
     case EvScanDone:
         furi_thread_join(app->thread);
         notification_message(app->notif, &sequence_display_backlight_enforce_auto);
@@ -1693,7 +1778,7 @@ static bool custom_event_callback(void* context, uint32_t event) {
     case EvResultSave:
         default_name(app);
         text_input_reset(app->text_input);
-        text_input_set_header_text(app->text_input, "Nev a menteshez");
+        text_input_set_header_text(app->text_input, L("Name for saving", "Nev a menteshez"));
         text_input_set_result_callback(
             app->text_input, name_done, app, app->name_buf, NAME_LEN, false);
         switch_to(app, ViewTextInput);
@@ -1703,10 +1788,10 @@ static bool custom_event_callback(void* context, uint32_t event) {
         return true;
     case EvResultMore:
         submenu_reset(app->details);
-        submenu_set_header(app->details, "Reszletek");
-        submenu_add_item(app->details, "Reszletes adatok", EvDetailData, details_callback, app);
-        submenu_add_item(app->details, "Modulaciok", EvDetailModulation, details_callback, app);
-        submenu_add_item(app->details, "Kompatibilitas", EvDetailCompat, details_callback, app);
+        submenu_set_header(app->details, L("Details", "Reszletek"));
+        submenu_add_item(app->details, L("Detailed data", "Reszletes adatok"), EvDetailData, details_callback, app);
+        submenu_add_item(app->details, L("Modulations", "Modulaciok"), EvDetailModulation, details_callback, app);
+        submenu_add_item(app->details, L("Compatibility", "Kompatibilitas"), EvDetailCompat, details_callback, app);
         switch_to(app, ViewDetails);
         return true;
     case EvDetailData:

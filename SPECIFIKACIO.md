@@ -119,3 +119,13 @@ próbák alapján.
 - A felület ékezet nélküli, mert a Flipper betűkészlete nem tud ékezetes betűt.
 - Az app csak vesz; „ismétlés” = új vizsgálat, nem adás. Küldeni a Sub-GHz alkalmazásból lehet.
 - Az első változat csak a belső CC1101-et használja.
+
+## Megvalósítás – 0.2 (2026-10-30)
+
+- **Kétnyelvű felület:** angol és magyar, a *Settings › Language/Nyelv* sorban választható (a megrendelő
+  döntése: egy alkalmazás nyelvválasztással, nem két külön app). **Telepítés után angol.** Minden
+  felületi szöveg angol–magyar pár a forrásban (`L(en, hu)`); a nyelvváltás után a beállítások listája
+  azonnal az új nyelven áll.
+- A jelentésfájl (`.txt`) kulcsai és értékei a nyelvtől függetlenül angolok (`Confidence: high / good /
+  low`), hogy a mentések egyforma szerkezetűek maradjanak; a `.sub` fájlok nyelvfüggetlenek.
+- Angol útmutató: `USAGE.md`. A repó publikus, MIT licenccel.

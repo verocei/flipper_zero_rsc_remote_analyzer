@@ -7,9 +7,10 @@ tries the four receive presets one after another (**AM270, AM650, FM238, FM476**
 decoder of the firmware, and shows what it found. If the remote stops transmitting before every
 preset was tested, it asks for another press and continues with the results it already has.
 
-The app is **receive only** – it never transmits. The UI is Hungarian (without accents, the Flipper
-fonts have none); the user guide is [HASZNALAT.md](HASZNALAT.md), the original specification is
-[SPECIFIKACIO.md](SPECIFIKACIO.md).
+The app is **receive only** – it never transmits. The UI is **English** by default, with Hungarian
+selectable in *Settings › Language/Nyelv* (Hungarian is shown without accents, the Flipper fonts have
+none). User guide: [USAGE.md](USAGE.md) (English), [HASZNALAT.md](HASZNALAT.md) (Hungarian); the original
+specification (Hungarian) is [SPECIFIKACIO.md](SPECIFIKACIO.md).
 
 ## How it works
 
@@ -33,6 +34,13 @@ fonts have none); the user guide is [HASZNALAT.md](HASZNALAT.md), the original s
 - `subghz/rsc_remote_analyzer/<name>.sub` – a standard Flipper SubGhz Key File for a decoded
   **fixed-code** protocol, or a Flipper SubGhz RAW File of the best-looking capture for an unknown one.
   Rolling-code protocols get the report only.
+
+The report keeps English keys and values in both UI languages.
+
+## Translations
+
+Every UI string is an English/Hungarian pair in the source, picked by the `L(en, hu)` macro from the
+language setting (`g_lang`); string arrays are indexed by `[LANG_COUNT]`.
 
 ## Build
 
